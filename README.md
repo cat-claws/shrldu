@@ -24,6 +24,7 @@ Ollama itself is expected to already be running separately on `127.0.0.1:11434`.
 From the `SHRDLUBlocksVLA` folder, run:
 
 ```bash
+source .venv/bin/activate
 python3 -m shrdlu_blocks.ollama_demo
 ```
 
@@ -41,7 +42,29 @@ Inside the GUI text box:
 - use `/command ...` for direct simulator commands such as `/command move_grasper -0.1 0.4`
 - use `/reset` to reset the world
 
-The default model is `qwen3:14b`, and the agent calls Ollama over HTTP.
+The default model is `qwen3.5:27b`, the default agent budget is `50` steps, and the
+agent calls Ollama over HTTP.
+
+If `qwen3.5:27b` is not installed locally yet, pull it first:
+
+```bash
+ollama pull qwen3.5:27b
+```
+
+Every natural-language request now saves a trace JSON file in `agent_traces/` with:
+- the request
+- each prompt sent to the model
+- raw model replies and retry details
+- parsed actions and simulator results
+
+You can override runtime settings with environment variables:
+
+```bash
+export SHRDLU_OLLAMA_MODEL=llama3.3:latest
+export SHRDLU_AGENT_MAX_STEPS=50
+export SHRDLU_AGENT_TRACE_DIR=agent_traces
+python3 -m shrdlu_blocks.ollama_demo
+```
 
 ## Original Command Demo
 

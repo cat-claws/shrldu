@@ -8,11 +8,19 @@ from typing import Dict, List, Optional
 
 from shrdlu_blocks.env import ShrdluBlocksEnv
 
-__all__ = ['OllamaShrdluAgent']
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+__all__ = ['OllamaShrdluAgent', 'OpenAICompatibleShrdluAgent']
 
 DEFAULT_MODEL = 'qwen3.5:27b'
 DEFAULT_MAX_STEPS = 50
 DEFAULT_TRACE_DIR = 'agent_traces'
+DEFAULT_OPENAI_BASE_URL = 'http://127.0.0.1:30000/v1/'
+DEFAULT_OPENAI_API_KEY = 'EMPTY'
+DEFAULT_OPENAI_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
 
 
 SYSTEM_PROMPT = """You control a blocks-world simulator through a small validated action API.
@@ -364,3 +372,49 @@ class OllamaShrdluAgent:
             return body['message']['content']
         except (KeyError, TypeError) as exc:
             raise RuntimeError("Unexpected Ollama response: %r" % body) from exc
+
+
+class OpenAICompatibleShrdluAgent(OllamaShrdluAgent):
+    """OpenAI-compatible chat-completions agent for the SHRDLU blocks environment."""
+
+    def __init__(self, env: ShrdluBlocksEnv, model: str = DEFAULT_OPENAI_MODEL,
+                 base_url: str = DEFAULT_OPENAI_BASE_URL,
+                 api_key: str = DEFAULT_OPENAI_API_KEY,
+                 max_steps: int = DEFAULT_MAX_STEPS,
+                 trace_dir: Optional[str] = DEFAULT_TRACE_DIR,
+                 temperature: float = 0.2,
+                 max_tokens: int = 512,
+                 client=None):
+        super().__init__(
+            env,
+            model=model,
+            host=base_url,
+            max_steps=max_steps,
+            trace_dir=trace_dir,
+        )
+        if client is None:
+            if OpenAI is None:
+                raise RuntimeError(
+                    'openai package is required for OpenAI-compatible demo support.'
+                )
+            client = OpenAI(base_url=base_url, api_key=api_key)
+        self._client = client
+        self._temperature = float(temperature)
+        self._max_tokens = int(max_tokens)
+
+    def _chat(self, messages: List[Dict[str, str]]) -> str:
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "OpenAI-compatible chat error at %s: %s" % (self._host, exc)
+            ) from exc
+        try:
+            return response.choices[0].message.content or ''
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise RuntimeError("Unexpected OpenAI-compatible response: %r" % response) from exc

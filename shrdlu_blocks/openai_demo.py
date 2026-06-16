@@ -1,4 +1,4 @@
-"""Natural-language GUI demo backed by an Ollama agent."""
+"""Natural-language GUI demo backed by an OpenAI-compatible chat-completions API."""
 
 import logging
 import os
@@ -8,9 +8,11 @@ import pygame
 
 from shrdlu_blocks.agent import (
     DEFAULT_MAX_STEPS,
-    DEFAULT_MODEL,
+    DEFAULT_OPENAI_API_KEY,
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MODEL,
     DEFAULT_TRACE_DIR,
-    OllamaShrdluAgent,
+    OpenAICompatibleShrdluAgent,
 )
 from shrdlu_blocks.env import ShrdluBlocksEnv
 from shrdlu_blocks.viewer import Viewer
@@ -18,18 +20,26 @@ from shrdlu_blocks.viewer import Viewer
 __all__ = ['demo']
 
 
-def demo(model: str = DEFAULT_MODEL, host: str = 'http://127.0.0.1:11434',
-         max_steps: int = DEFAULT_MAX_STEPS, trace_dir: str = DEFAULT_TRACE_DIR):
-    """Run the GUI demo with natural-language input routed through Ollama."""
+def demo(model: str = DEFAULT_OPENAI_MODEL,
+         base_url: str = DEFAULT_OPENAI_BASE_URL,
+         api_key: str = DEFAULT_OPENAI_API_KEY,
+         max_steps: int = DEFAULT_MAX_STEPS,
+         trace_dir: str = DEFAULT_TRACE_DIR,
+         temperature: float = 0.2,
+         max_tokens: int = 512):
+    """Run the GUI demo with natural-language input routed through a local OpenAI API."""
     pygame.init()
 
     env = ShrdluBlocksEnv()
-    agent = OllamaShrdluAgent(
+    agent = OpenAICompatibleShrdluAgent(
         env,
         model=model,
-        host=host,
+        base_url=base_url,
+        api_key=api_key,
         max_steps=max_steps,
         trace_dir=trace_dir,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
     screen_info = pygame.display.Info()
@@ -44,7 +54,7 @@ def demo(model: str = DEFAULT_MODEL, host: str = 'http://127.0.0.1:11434',
 
     viewer = Viewer(
         screen,
-        "SHRDLU Blocks VLA Demo",
+        "SHRDLU Blocks OpenAI-Compatible Demo",
         callback=handle_text,
         initial_output=(
             'Type a natural-language instruction.\n'
@@ -59,8 +69,11 @@ def demo(model: str = DEFAULT_MODEL, host: str = 'http://127.0.0.1:11434',
 if __name__ == '__main__':
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
     demo(
-        model=os.environ.get('SHRDLU_OLLAMA_MODEL', DEFAULT_MODEL),
-        host=os.environ.get('SHRDLU_OLLAMA_HOST', 'http://127.0.0.1:11434'),
+        model=os.environ.get('SHRDLU_OPENAI_MODEL', DEFAULT_OPENAI_MODEL),
+        base_url=os.environ.get('SHRDLU_OPENAI_BASE_URL', DEFAULT_OPENAI_BASE_URL),
+        api_key=os.environ.get('SHRDLU_OPENAI_API_KEY', DEFAULT_OPENAI_API_KEY),
         max_steps=int(os.environ.get('SHRDLU_AGENT_MAX_STEPS', DEFAULT_MAX_STEPS)),
         trace_dir=os.environ.get('SHRDLU_AGENT_TRACE_DIR', DEFAULT_TRACE_DIR),
+        temperature=float(os.environ.get('SHRDLU_OPENAI_TEMPERATURE', '0.2')),
+        max_tokens=int(os.environ.get('SHRDLU_OPENAI_MAX_TOKENS', '512')),
     )

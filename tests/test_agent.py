@@ -3,7 +3,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from shrdlu_blocks.agent import DECISION_SCHEMA, OllamaShrdluAgent
+from shrdlu_blocks.agent import (
+    DECISION_SCHEMA,
+    OllamaShrdluAgent,
+    OpenAICompatibleShrdluAgent,
+)
 from shrdlu_blocks.env import ShrdluBlocksEnv
 
 
@@ -100,6 +104,57 @@ class RetryTests(unittest.TestCase):
             trace = json.loads(trace_files[0].read_text(encoding='utf-8'))
             self.assertEqual('finished', trace['status'])
             self.assertEqual('Done.', trace['final_message'])
+
+    def test_openai_compatible_chat_returns_message_content(self):
+        class FakeCompletions:
+            @staticmethod
+            def create(**kwargs):
+                self.assertEqual('model-name', kwargs['model'])
+                self.assertEqual(0.2, kwargs['temperature'])
+                self.assertEqual(512, kwargs['max_tokens'])
+                return type(
+                    'Response',
+                    (),
+                    {
+                        'choices': [
+                            type(
+                                'Choice',
+                                (),
+                                {
+                                    'message': type(
+                                        'Message',
+                                        (),
+                                        {
+                                            'content': '{"response": "Done.", "action": {"name": "finish", "args": {}}}',
+                                        },
+                                    )(),
+                                },
+                            )(),
+                        ],
+                    },
+                )()
+
+        fake_client = type(
+            'Client',
+            (),
+            {
+                'chat': type(
+                    'Chat',
+                    (),
+                    {'completions': FakeCompletions()},
+                )(),
+            },
+        )()
+
+        agent = OpenAICompatibleShrdluAgent(
+            ShrdluBlocksEnv(),
+            model='model-name',
+            client=fake_client,
+        )
+
+        content = agent._chat([{'role': 'system', 'content': 'system'}])
+
+        self.assertIn('"finish"', content)
 
 
 if __name__ == '__main__':

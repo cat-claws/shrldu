@@ -6,7 +6,9 @@ simulator and adds a source-run VLA-style interface on top of it.
 The main pieces are:
 - `shrdlu_blocks.demo`: the original low-level command demo
 - `shrdlu_blocks.ollama_demo`: the natural-language GUI backed by Ollama
+- `shrdlu_blocks.preplanned_ollama_demo`: the natural-language GUI that plans the full action sequence first
 - `shrdlu_blocks.openai_demo`: the natural-language GUI backed by an OpenAI-compatible API
+- `shrdlu_blocks.preplanned_openai_demo`: the plan-first OpenAI-compatible GUI
 - `shrdlu_blocks.env`: a reusable in-process environment wrapper
 - `shrdlu_blocks.agent`: the Ollama-backed agent loop
 
@@ -36,6 +38,18 @@ This starts:
 
 You do not need to build or compile the project first.
 
+## Preplanned Ollama Demo
+
+If you want a plan-first agent instead of the default step-by-step replanning loop, run:
+
+```bash
+source .venv/bin/activate
+python3 -m shrdlu_blocks.preplanned_ollama_demo
+```
+
+This variant reads the scene once, plans the entire action sequence up front, and then
+executes that stored plan without asking the model again after each action.
+
 ## OpenAI-Compatible Demo
 
 To use a local OpenAI-compatible server like the example below:
@@ -62,6 +76,13 @@ The default OpenAI-compatible settings are:
 - model: `Qwen/Qwen2.5-0.5B-Instruct`
 - temperature: `0.2`
 - max tokens per chat call: `512`
+
+If you want the same OpenAI-compatible backend but with a full plan computed up front, run:
+
+```bash
+source .venv/bin/activate
+python3 -m shrdlu_blocks.preplanned_openai_demo
+```
 
 You can override them with environment variables:
 
@@ -122,7 +143,9 @@ python3 -m shrdlu_blocks.demo
 - `shrdlu_blocks/env.py`: environment wrapper for agent use
 - `shrdlu_blocks/agent.py`: validated-action agent loop over Ollama HTTP
 - `shrdlu_blocks/ollama_demo.py`: natural-language GUI entry point
+- `shrdlu_blocks/preplanned_ollama_demo.py`: plan-first Ollama GUI entry point
 - `shrdlu_blocks/openai_demo.py`: OpenAI-compatible GUI entry point
+- `shrdlu_blocks/preplanned_openai_demo.py`: plan-first OpenAI-compatible GUI entry point
 
 ## Notes
 

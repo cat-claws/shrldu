@@ -7,6 +7,8 @@ from shrdlu_blocks.agent import (
     DECISION_SCHEMA,
     OllamaShrdluAgent,
     OpenAICompatibleShrdluAgent,
+    PLAN_SCHEMA,
+    PreplannedOllamaShrdluAgent,
 )
 from shrdlu_blocks.env import ShrdluBlocksEnv
 
@@ -29,6 +31,20 @@ class ParsingTests(unittest.TestCase):
     def test_parse_rejects_missing_action(self):
         with self.assertRaisesRegex(ValueError, 'action object'):
             OllamaShrdluAgent._parse_decision('{"response": "Hello"}')
+
+    def test_parse_plan_accepts_full_plan(self):
+        plan = PreplannedOllamaShrdluAgent._parse_plan(
+            '{"response": "Plan ready.", "plan": [{"name": "raise_grasper", "args": {}}], "finish_response": "Done."}'
+        )
+        self.assertEqual('Plan ready.', plan['response'])
+        self.assertEqual('Done.', plan['finish_response'])
+        self.assertEqual('raise_grasper', plan['plan'][0]['name'])
+
+    def test_parse_plan_rejects_missing_plan_array(self):
+        with self.assertRaisesRegex(ValueError, 'plan array'):
+            PreplannedOllamaShrdluAgent._parse_plan(
+                '{"response": "Hello", "finish_response": "Done."}'
+            )
 
 
 class RetryTests(unittest.TestCase):
@@ -76,6 +92,34 @@ class RetryTests(unittest.TestCase):
             agent._chat([{'role': 'system', 'content': 'system'}])
 
         self.assertEqual(DECISION_SCHEMA, captured['format'])
+
+    def test_chat_accepts_custom_schema(self):
+        agent = OllamaShrdluAgent(ShrdluBlocksEnv())
+        captured = {}
+
+        def fake_urlopen(req):
+            import json
+
+            captured.update(json.loads(req.data.decode('utf-8')))
+
+            class Response:
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, exc_type, exc, tb):
+                    return False
+
+                def read(self_inner):
+                    return b'{"message": {"content": "{\\"response\\": \\"Done.\\", \\"plan\\": [], \\"finish_response\\": \\"Done.\\"}"}}'
+
+            return Response()
+
+        from unittest.mock import patch
+
+        with patch('shrdlu_blocks.agent.request.urlopen', fake_urlopen):
+            agent._chat([{'role': 'system', 'content': 'system'}], schema=PLAN_SCHEMA)
+
+        self.assertEqual(PLAN_SCHEMA, captured['format'])
 
     def test_error_trace_is_written(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -155,6 +199,28 @@ class RetryTests(unittest.TestCase):
         content = agent._chat([{'role': 'system', 'content': 'system'}])
 
         self.assertIn('"finish"', content)
+
+    def test_preplanned_agent_executes_without_replanning(self):
+        agent = PreplannedOllamaShrdluAgent(ShrdluBlocksEnv(), trace_dir=None)
+        calls = []
+
+        def fake_chat(messages, schema=DECISION_SCHEMA):
+            calls.append({'messages': messages, 'schema': schema})
+            return (
+                '{"response": "Plan ready.", "plan": ['
+                '{"name": "move_grasper", "args": {"x": -0.1, "y": 0.4}}, '
+                '{"name": "lower_grasper", "args": {}}, '
+                '{"name": "close_grasper", "args": {}}'
+                '], "finish_response": "Done."}'
+            )
+
+        agent._chat = fake_chat
+
+        result = agent.handle_user_input('pick up the blue block')
+
+        self.assertEqual('Plan ready.\n\nDone.', result)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(PLAN_SCHEMA, calls[0]['schema'])
 
 
 if __name__ == '__main__':

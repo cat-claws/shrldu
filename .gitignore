@@ -239,6 +239,9 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# Agent traces
+agent_traces*/
+
 # Pyre type checker
 .pyre/
 
@@ -417,4 +420,3 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
-

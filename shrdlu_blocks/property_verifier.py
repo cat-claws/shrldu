@@ -1,48 +1,80 @@
-"""Property verification utilities for SHRDLU transition snapshots."""
+"""AP and property verification utilities for SHRDLU world snapshots."""
 
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Dict, Iterable, List, Optional
-
-from shrdlu_blocks.scenes import Scene
 
 __all__ = ['PROPERTY_FILE', 'TransitionPropertyVerifier']
 
 
-PROPERTY_FILE = Path(__file__).resolve().parent.parent / 'SHRDLU_PROPERTIES_AST.json'
+PROPERTY_FILE = Path(__file__).resolve().parent.parent / 'SHRDLU_AP_CANDIDATES.json'
 
-_OBJECT_CAN_SUPPORT_RE = re.compile(r'^object_(\d+)_can_support$')
-_OBJECT_HIGHLIGHTED_RE = re.compile(r'^object_(\d+)_highlighted$')
-_OBJECT_ABOVE_RE = re.compile(r'^object_(\d+)_above_object_(\d+)$')
-
-
-@dataclass(frozen=True)
-class _TransitionContext:
-    pre_state: Dict[str, object]
-    action: Dict[str, object]
-    post_state: Dict[str, object]
-    pre_scene: Optional[Scene] = None
-    post_scene: Optional[Scene] = None
+PROPERTY_SPECS = [
+    {
+        'id': 'prop.object_4_on_6_stays_on_6',
+        'ltl': 'G(object_4_resting_on_6 -> G(object_4_resting_on_6))',
+        'description': 'Once object 4 is on object 6, it stays on object 6 forever.',
+    },
+    {
+        'id': 'prop.object_4_not_on_3_and_6_simultaneously',
+        'ltl': 'G(!(object_4_resting_on_3 && object_4_resting_on_6))',
+        'description': 'Object 4 is never simultaneously resting on both object 3 and object 6.',
+    },
+    {
+        'id': 'prop.no_object_resting_on_4',
+        'ltl': 'G(!some_object_resting_on_4)',
+        'description': 'No object is ever resting on object 4.',
+    },
+    {
+        'id': 'prop.no_object_resting_on_8',
+        'ltl': 'G(!some_object_resting_on_8)',
+        'description': 'No object is ever resting on object 8.',
+    },
+    {
+        'id': 'prop.no_object_resting_on_10',
+        'ltl': 'G(!some_object_resting_on_10)',
+        'description': 'No object is ever resting on object 10.',
+    },
+    {
+        'id': 'prop.lowered_eventually_raised',
+        'ltl': 'G(grasper_lowered -> F(!grasper_lowered))',
+        'description': 'Whenever the grasper is lowered, it is eventually raised again.',
+    },
+    {
+        'id': 'prop.closed_eventually_open',
+        'ltl': 'G(grasper_closed -> F(!grasper_closed))',
+        'description': 'Whenever the grasper is closed, it is eventually opened again.',
+    },
+    {
+        'id': 'prop.object_on_10_implies_next_closed',
+        'ltl': 'G(some_object_resting_on_10 -> X(grasper_closed))',
+        'description': 'Whenever something is resting on object 10, the next state has the grasper closed.',
+    },
+]
 
 
 class TransitionPropertyVerifier:
-    """Evaluate transition properties over simulator snapshots."""
+    """Evaluate the current AP set and concrete LTL properties."""
 
     def __init__(self, properties: Iterable[Dict[str, object]]):
-        self._properties = list(properties)
+        del properties
+        self._aps = self._load_ap_specs(PROPERTY_FILE)
+        self._properties = list(PROPERTY_SPECS)
 
     @classmethod
     def from_file(cls, path: Path = PROPERTY_FILE) -> 'TransitionPropertyVerifier':
-        payload = json.loads(path.read_text(encoding='utf-8'))
-        return cls(payload.get('properties', []))
+        return cls(cls._load_ap_specs(path))
 
     @property
     def properties(self) -> List[Dict[str, object]]:
         return list(self._properties)
+
+    @property
+    def aps(self) -> List[Dict[str, object]]:
+        return list(self._aps)
 
     def verify_transition(
         self,
@@ -50,23 +82,19 @@ class TransitionPropertyVerifier:
         action: Dict[str, object],
         post_state: Dict[str, object],
         *,
-        pre_scene: Optional[Scene] = None,
-        post_scene: Optional[Scene] = None,
+        pre_scene=None,
+        post_scene=None,
     ) -> Dict[str, object]:
-        context = _TransitionContext(
-            pre_state=pre_state,
-            action=action,
-            post_state=post_state,
-            pre_scene=pre_scene,
-            post_scene=post_scene,
-        )
+        del pre_state, action, pre_scene, post_scene
         ap_cache: Dict[str, bool] = {}
         property_results = []
-        for spec in self._properties:
-            satisfied = self._eval_ast(spec['ast'], context, ap_cache)
+        for spec in self._aps:
+            name = str(spec.get('name', ''))
+            satisfied = self._eval_ap(name, post_state)
+            ap_cache[name] = satisfied
             property_results.append({
-                'id': spec.get('id'),
-                'natural_language': spec.get('natural_language'),
+                'id': name,
+                'natural_language': spec.get('description'),
                 'satisfied': satisfied,
             })
         violations = [result for result in property_results if not result['satisfied']]
@@ -77,139 +105,194 @@ class TransitionPropertyVerifier:
             'derived_aps': dict(sorted(ap_cache.items())),
         }
 
-    def _eval_ast(
-        self,
-        node: Dict[str, object],
-        context: _TransitionContext,
-        ap_cache: Dict[str, bool],
-    ) -> bool:
-        node_type = node.get('type')
-        if node_type == 'globally':
-            return self._eval_ast(node['operand'], context, ap_cache)
-        if node_type == 'implies':
-            return (not self._eval_ast(node['left'], context, ap_cache)) or self._eval_ast(
-                node['right'], context, ap_cache
-            )
-        if node_type == 'and':
-            return all(self._eval_ast(arg, context, ap_cache) for arg in node.get('args', []))
-        if node_type == 'or':
-            return any(self._eval_ast(arg, context, ap_cache) for arg in node.get('args', []))
-        if node_type == 'not':
-            return not self._eval_ast(node['operand'], context, ap_cache)
-        if node_type == 'ap':
-            name = str(node['name'])
-            if name not in ap_cache:
-                ap_cache[name] = self._eval_ap(name, context)
-            return ap_cache[name]
-        raise ValueError('Unsupported AST node type: %r' % (node_type,))
+    def verify_trace(self, states: List[Dict[str, object]]) -> Dict[str, object]:
+        ap_trace = [self._evaluate_state_aps(state) for state in states]
+        property_results = []
+        for spec in self._properties:
+            satisfied = self._eval_property(spec['id'], ap_trace)
+            property_results.append({
+                'id': spec['id'],
+                'natural_language': spec['description'],
+                'ltl': spec['ltl'],
+                'satisfied': satisfied,
+            })
+        violations = [result for result in property_results if not result['satisfied']]
+        return {
+            'all_satisfied': not violations,
+            'violations': violations,
+            'property_results': property_results,
+            'ap_trace': ap_trace,
+        }
 
-    def _eval_ap(self, name: str, context: _TransitionContext) -> bool:
-        action_name = str(context.action.get('name', '')).strip()
-        if name.startswith('last_action_'):
-            return action_name == name[len('last_action_'):]
-        if name == 'pre_grasper_lowered':
-            return bool(context.pre_state.get('grasper_lowered', False))
-        if name == 'pre_grasper_closed':
-            return bool(context.pre_state.get('grasper_closed', False))
-        if name == 'pre_grasper_holding':
-            return context.pre_state.get('grasped_object') is not None
-        if name == 'pre_held_object_resting_on_object':
-            held = self._get_object(context.pre_state, context.pre_state.get('grasped_object'))
-            return held is not None and held.get('resting_on') is not None
-        if name == 'pre_support_can_support_held':
-            return self._pre_support_can_support_held(context)
-        if name == 'pre_grasper_resting_on_graspable':
-            grasper = self._get_default_grasper(context.pre_state)
-            if grasper is None:
-                return False
-            support = self._get_object(context.pre_state, grasper.get('resting_on'))
-            return support is not None and bool(support.get('graspable', False))
-        if name == 'post_grasper_holding':
-            return context.post_state.get('grasped_object') is not None
-        if name == 'post_grasper_closed':
-            return bool(context.post_state.get('grasper_closed', False))
-        if name == 'post_grasper_lowered':
-            return bool(context.post_state.get('grasper_lowered', False))
-
-        object_match = _OBJECT_CAN_SUPPORT_RE.match(name)
-        if object_match:
-            obj = self._get_object(context.post_state, int(object_match.group(1)))
-            return obj is not None and bool(obj.get('can_support', False))
-
-        object_match = _OBJECT_HIGHLIGHTED_RE.match(name)
-        if object_match:
-            obj = self._get_object(context.post_state, int(object_match.group(1)))
-            if obj is None:
-                return False
-            return bool(obj.get('tags', {}).get('highlight', False))
-
-        object_match = _OBJECT_ABOVE_RE.match(name)
-        if object_match:
-            upper_id = int(object_match.group(1))
-            lower_id = int(object_match.group(2))
-            return self._object_above_object(context, upper_id, lower_id)
-
+    def _eval_ap(self, name: str, state: Dict[str, object]) -> bool:
+        if name == 'some_object_resting_on_4':
+            return any(obj.get('resting_on') == 4 for obj in state.get('objects', []))
+        if name == 'some_object_resting_on_8':
+            return any(obj.get('resting_on') == 8 for obj in state.get('objects', []))
+        if name == 'some_object_resting_on_10':
+            return any(obj.get('resting_on') == 10 for obj in state.get('objects', []))
+        if name == 'object_5_resting_on_2':
+            return self._object_resting_on(state, 5, 2)
+        if name == 'object_4_resting_on_3':
+            return self._object_resting_on(state, 4, 3)
+        if name == 'object_8_resting_on_7':
+            return self._object_resting_on(state, 8, 7)
+        if name == 'object_10_resting_on_9':
+            return self._object_resting_on(state, 10, 9)
+        if name == 'grasper_closed':
+            return state.get('grasper_closed') is True
+        if name == 'grasper_lowered':
+            return state.get('grasper_lowered') is True
+        if name == 'object_4_resting_on_6':
+            return self._object_resting_on(state, 4, 6)
         raise ValueError('Unsupported atomic proposition: %s' % name)
 
-    def _pre_support_can_support_held(self, context: _TransitionContext) -> bool:
-        held_id = context.pre_state.get('grasped_object')
-        held = self._get_object(context.pre_state, held_id)
-        if held is None:
-            return False
-        support_id = held.get('resting_on')
-        if support_id is None:
-            return False
-        if context.pre_scene is not None:
-            held_obj = self._get_scene_object(context.pre_scene, int(held_id))
-            support_obj = self._get_scene_object(context.pre_scene, int(support_id))
-            if held_obj is not None and support_obj is not None:
-                return support_obj.can_support(held_obj)
-        support = self._get_object(context.pre_state, support_id)
-        return support is not None and bool(support.get('can_support', False))
+    def _evaluate_state_aps(self, state: Dict[str, object]) -> Dict[str, bool]:
+        values = {}
+        for spec in self._aps:
+            name = str(spec.get('name', ''))
+            values[name] = self._eval_ap(name, state)
+        return values
 
-    def _object_above_object(
-        self,
-        context: _TransitionContext,
-        upper_id: int,
-        lower_id: int,
-    ) -> bool:
-        scene = context.post_scene or context.pre_scene
-        if scene is not None:
-            upper_obj = self._get_scene_object(scene, upper_id)
-            lower_obj = self._get_scene_object(scene, lower_id)
-            if upper_obj is not None and lower_obj is not None:
-                upper_bottom = upper_obj.position.z
-                lower_top = lower_obj.find_highest_point().z
-                return upper_bottom > lower_top
-        upper = self._get_object(context.post_state, upper_id) or self._get_object(context.pre_state, upper_id)
-        lower = self._get_object(context.post_state, lower_id) or self._get_object(context.pre_state, lower_id)
-        if upper is None or lower is None:
-            return False
-        return float(upper['position']['z']) > float(lower['position']['z'])
+    def _eval_property(self, prop_id: str, ap_trace: List[Dict[str, bool]]) -> bool:
+        if prop_id == 'prop.object_4_on_6_stays_on_6':
+            return self._prop_object_4_on_6_stays_on_6(ap_trace)
+        if prop_id == 'prop.object_4_not_on_3_and_6_simultaneously':
+            return self._globally(ap_trace, lambda s, i: not (s['object_4_resting_on_3'] and s['object_4_resting_on_6']))
+        if prop_id == 'prop.no_object_resting_on_4':
+            return self._globally(ap_trace, lambda s, i: not s['some_object_resting_on_4'])
+        if prop_id == 'prop.no_object_resting_on_8':
+            return self._globally(ap_trace, lambda s, i: not s['some_object_resting_on_8'])
+        if prop_id == 'prop.no_object_resting_on_10':
+            return self._globally(ap_trace, lambda s, i: not s['some_object_resting_on_10'])
+        if prop_id == 'prop.lowered_eventually_raised':
+            return self._globally(
+                ap_trace,
+                lambda s, i: (not s['grasper_lowered']) or self._eventually(ap_trace, i, lambda future: not future['grasper_lowered']),
+            )
+        if prop_id == 'prop.closed_eventually_open':
+            return self._globally(
+                ap_trace,
+                lambda s, i: (not s['grasper_closed']) or self._eventually(ap_trace, i, lambda future: not future['grasper_closed']),
+            )
+        if prop_id == 'prop.object_on_10_implies_next_closed':
+            return self._globally(
+                ap_trace,
+                lambda s, i: (not s['some_object_resting_on_10']) or self._next(ap_trace, i, lambda nxt: nxt['grasper_closed']),
+            )
+        raise ValueError('Unsupported property id: %s' % prop_id)
 
     @staticmethod
-    def _get_object(snapshot: Dict[str, object], obj_id: object) -> Optional[Dict[str, object]]:
-        if obj_id is None:
-            return None
+    def _globally(ap_trace: List[Dict[str, bool]], predicate) -> bool:
+        return all(predicate(state, index) for index, state in enumerate(ap_trace))
+
+    @staticmethod
+    def _eventually(ap_trace: List[Dict[str, bool]], start_index: int, predicate) -> bool:
+        return any(predicate(ap_trace[index]) for index in range(start_index, len(ap_trace)))
+
+    @staticmethod
+    def _next(ap_trace: List[Dict[str, bool]], index: int, predicate) -> bool:
+        next_index = index + 1
+        if next_index >= len(ap_trace):
+            return False
+        return predicate(ap_trace[next_index])
+
+    def _prop_object_4_on_6_stays_on_6(self, ap_trace: List[Dict[str, bool]]) -> bool:
+        for index, state in enumerate(ap_trace):
+            if state['object_4_resting_on_6'] and not all(
+                future['object_4_resting_on_6'] for future in ap_trace[index:]
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _load_ap_specs(path: Path) -> List[Dict[str, object]]:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+        return list(payload.get('current_state_aps', []))
+
+    @staticmethod
+    def _get_object(snapshot: Dict[str, object], obj_id: int) -> Optional[Dict[str, object]]:
         for obj in snapshot.get('objects', []):
             if obj.get('obj_id') == obj_id:
                 return obj
         return None
 
     @classmethod
-    def _get_default_grasper(cls, snapshot: Dict[str, object]) -> Optional[Dict[str, object]]:
-        default_grasper = snapshot.get('default_grasper')
-        if default_grasper is not None:
-            grasper = cls._get_object(snapshot, default_grasper)
-            if grasper is not None:
-                return grasper
-        for obj in snapshot.get('objects', []):
-            if obj.get('kind') == 'grasper':
-                return obj
-        return None
+    def _object_resting_on(cls, snapshot: Dict[str, object], obj_id: int, support_id: int) -> bool:
+        obj = cls._get_object(snapshot, obj_id)
+        return obj is not None and obj.get('resting_on') == support_id
 
-    @staticmethod
-    def _get_scene_object(scene: Scene, obj_id: int):
-        for obj in scene.find_objects(obj_id=obj_id):
-            return obj
-        return None
+
+if __name__ == '__main__':
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from shrdlu_blocks.env import ShrdluBlocksEnv
+
+    def print_ap_results(title: str, result: Dict[str, object]) -> None:
+        print(title)
+        for item in result['property_results']:
+            print(f"{item['id']}\t{item['satisfied']}")
+
+    env = ShrdluBlocksEnv()
+    state = env.snapshot()
+    verifier = TransitionPropertyVerifier.from_file()
+    result = verifier.verify_transition(state, {'name': 'init', 'args': {}}, state)
+    trace_result = verifier.verify_trace([state])
+
+    print('INITIAL_AP_RESULTS')
+    for item in result['property_results']:
+        print(f"{item['id']}\t{item['satisfied']}")
+
+    print('\nINITIAL_TRACE_PROPERTY_RESULTS')
+    for item in trace_result['property_results']:
+        print(f"{item['id']}\t{item['satisfied']}\t{item['ltl']}")
+
+    print('\nOBJECTS')
+    for obj in state['objects']:
+        print(obj['obj_id'], obj['kind'], obj['color'], 'resting_on=', obj['resting_on'])
+
+    print('\nGRASPER')
+    print('grasper_closed=', state['grasper_closed'])
+    print('grasper_lowered=', state['grasper_lowered'])
+
+    print('\nDEMO_TRACE_MOVE_RED_PYRAMID_ONTO_MEDIUM_GREEN_BLOCK')
+    demo_env = ShrdluBlocksEnv()
+    before = demo_env.snapshot()
+    before_ap = verifier.verify_transition(before, {'name': 'init', 'args': {}}, before)
+    demo_plan = [
+        {'name': 'move_grasper', 'args': {'x': 0.15, 'y': -0.1}},
+        {'name': 'lower_grasper', 'args': {}},
+        {'name': 'close_grasper', 'args': {}},
+        {'name': 'raise_grasper', 'args': {}},
+        {'name': 'move_grasper', 'args': {'x': -0.3, 'y': 0.05}},
+        {'name': 'lower_grasper', 'args': {}},
+        {'name': 'open_grasper', 'args': {}},
+    ]
+    demo_states = [before]
+    demo_results = []
+    current = before
+    for action in demo_plan:
+        outcome = demo_env.execute_action(action)
+        current = demo_env.snapshot()
+        demo_states.append(current)
+        demo_results.append((action, outcome))
+    after = demo_states[-1]
+    after_ap = verifier.verify_transition(before, {'name': 'demo_plan', 'args': {}}, after)
+    demo_trace_result = verifier.verify_trace(demo_states)
+
+    print()
+    print_ap_results('DEMO_AP_BEFORE', before_ap)
+    print()
+    print_ap_results('DEMO_AP_AFTER', after_ap)
+    print()
+    print('DEMO_ACTION_RESULTS')
+    for action, outcome in demo_results:
+        print(action, '=>', outcome)
+    print()
+    print('DEMO_PROPERTY_RESULTS_ON_TRACE')
+    for item in demo_trace_result['property_results']:
+        print(f"{item['id']}\t{item['satisfied']}\t{item['ltl']}")
+    print()
+    print('DEMO_TRACE_LENGTH', len(demo_states))

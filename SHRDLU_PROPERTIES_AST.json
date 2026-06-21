@@ -1,353 +1,176 @@
 {
   "metadata": {
-    "purpose": "Sole property/specification catalog for SHRDLU",
+    "purpose": "Property/specification catalog for SHRDLU using the current 10 APs",
     "logic_style": "finite-trace LTL AST",
     "notes": [
-      "Each entry is a proposition/specification, not an AP definition.",
-      "Atomic propositions referenced here are assumed to be supplied by the verifier from simulator state or transition snapshots.",
-      "Some propositions refer to grounded object relations such as object_7_above_object_3."
+      "Each property uses only the APs defined in SHRDLU_AP_CANDIDATES.json.",
+      "The AP vocabulary is state-based and grounded in simulator fields such as resting_on, grasper_closed, and grasper_lowered.",
+      "These properties are the currently selected working set."
     ]
   },
   "properties": [
     {
-      "id": "prop.no_move_from_lowered_state",
-      "natural_language": "No move_grasper transition starts from a state in which the grasper is lowered.",
+      "id": "prop.object_4_on_6_stays_on_6",
+      "natural_language": "Once object 4 is resting on object 6, it stays resting on object 6 forever.",
+      "ltl": "G(object_4_resting_on_6 -> G(object_4_resting_on_6))",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
           "left": {
             "type": "ap",
-            "name": "last_action_move_grasper"
+            "name": "object_4_resting_on_6"
           },
           "right": {
-            "type": "not",
+            "type": "globally",
             "operand": {
               "type": "ap",
-              "name": "pre_grasper_lowered"
+              "name": "object_4_resting_on_6"
             }
           }
         }
       }
     },
     {
-      "id": "prop.raise_starts_from_lowered_state",
-      "natural_language": "Every raise_grasper transition starts from a state in which the grasper is lowered.",
+      "id": "prop.object_4_not_on_3_and_6_simultaneously",
+      "natural_language": "Object 4 is never simultaneously resting on object 3 and object 6.",
+      "ltl": "G(!(object_4_resting_on_3 && object_4_resting_on_6))",
       "ast": {
         "type": "globally",
         "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_raise_grasper"
-          },
-          "right": {
-            "type": "ap",
-            "name": "pre_grasper_lowered"
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.lower_starts_from_not_lowered_state",
-      "natural_language": "Every lower_grasper transition starts from a state in which the grasper is not lowered.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_lower_grasper"
-          },
-          "right": {
-            "type": "not",
-            "operand": {
-              "type": "ap",
-              "name": "pre_grasper_lowered"
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.close_starts_from_open_state",
-      "natural_language": "Every close_grasper transition starts from a state in which the grasper is not closed.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_close_grasper"
-          },
-          "right": {
-            "type": "not",
-            "operand": {
-              "type": "ap",
-              "name": "pre_grasper_closed"
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.open_starts_from_closed_state",
-      "natural_language": "Every open_grasper transition starts from a state in which the grasper is closed.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_open_grasper"
-          },
-          "right": {
-            "type": "ap",
-            "name": "pre_grasper_closed"
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.open_while_holding_starts_from_supported_state",
-      "natural_language": "Every open_grasper transition that starts from a state where the grasper holds an object also starts from a state where that held object is resting on an object.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
+          "type": "not",
+          "operand": {
             "type": "and",
             "args": [
               {
                 "type": "ap",
-                "name": "last_action_open_grasper"
+                "name": "object_4_resting_on_3"
               },
               {
                 "type": "ap",
-                "name": "pre_grasper_holding"
+                "name": "object_4_resting_on_6"
               }
             ]
-          },
-          "right": {
-            "type": "ap",
-            "name": "pre_held_object_resting_on_object"
           }
         }
       }
     },
     {
-      "id": "prop.open_while_holding_starts_from_supporting_state",
-      "natural_language": "Every open_grasper transition that starts from a state where the grasper holds an object also starts from a state where the support below that object can support it.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              {
-                "type": "ap",
-                "name": "last_action_open_grasper"
-              },
-              {
-                "type": "ap",
-                "name": "pre_grasper_holding"
-              }
-            ]
-          },
-          "right": {
-            "type": "ap",
-            "name": "pre_support_can_support_held"
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.close_on_graspable_support_ends_in_holding_state",
-      "natural_language": "Every close_grasper transition that starts from a lowered state in which the grasper is resting on a graspable object ends in a state where the grasper holds an object.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              {
-                "type": "ap",
-                "name": "last_action_close_grasper"
-              },
-              {
-                "type": "ap",
-                "name": "pre_grasper_lowered"
-              },
-              {
-                "type": "ap",
-                "name": "pre_grasper_resting_on_graspable"
-              }
-            ]
-          },
-          "right": {
-            "type": "ap",
-            "name": "post_grasper_holding"
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.close_ends_in_closed_state",
-      "natural_language": "Every close_grasper transition ends in a state where the grasper is closed.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_close_grasper"
-          },
-          "right": {
-            "type": "ap",
-            "name": "post_grasper_closed"
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.open_ends_in_open_state",
-      "natural_language": "Every open_grasper transition ends in a state where the grasper is not closed.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_open_grasper"
-          },
-          "right": {
-            "type": "not",
-            "operand": {
-              "type": "ap",
-              "name": "post_grasper_closed"
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.open_while_holding_ends_in_not_holding_state",
-      "natural_language": "Every open_grasper transition that starts from a state where the grasper holds an object ends in a state where the grasper does not hold an object.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              {
-                "type": "ap",
-                "name": "last_action_open_grasper"
-              },
-              {
-                "type": "ap",
-                "name": "pre_grasper_holding"
-              }
-            ]
-          },
-          "right": {
-            "type": "not",
-            "operand": {
-              "type": "ap",
-              "name": "post_grasper_holding"
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.lower_ends_in_lowered_state",
-      "natural_language": "Every lower_grasper transition ends in a state where the grasper is lowered.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_lower_grasper"
-          },
-          "right": {
-            "type": "ap",
-            "name": "post_grasper_lowered"
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.raise_ends_in_not_lowered_state",
-      "natural_language": "Every raise_grasper transition ends in a state where the grasper is not lowered.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "ap",
-            "name": "last_action_raise_grasper"
-          },
-          "right": {
-            "type": "not",
-            "operand": {
-              "type": "ap",
-              "name": "post_grasper_lowered"
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "prop.object_7_never_above_object_3",
-      "natural_language": "Object 7 is never above object 3.",
+      "id": "prop.no_object_resting_on_4",
+      "natural_language": "No object is ever resting on object 4.",
+      "ltl": "G(!some_object_resting_on_4)",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "not",
           "operand": {
             "type": "ap",
-            "name": "object_7_above_object_3"
+            "name": "some_object_resting_on_4"
           }
         }
-      },
-      "notes": [
-        "This property assumes the verifier provides a grounded state predicate object_7_above_object_3."
-      ]
+      }
     },
     {
-      "id": "prop.object_9_always_can_support",
-      "natural_language": "Object 9 always has can_support true.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "ap",
-          "name": "object_9_can_support"
-        }
-      },
-      "notes": [
-        "This is a scene invariant over a grounded state predicate."
-      ]
-    },
-    {
-      "id": "prop.object_10_never_highlighted",
-      "natural_language": "Object 10 is never highlighted.",
+      "id": "prop.no_object_resting_on_8",
+      "natural_language": "No object is ever resting on object 8.",
+      "ltl": "G(!some_object_resting_on_8)",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "not",
           "operand": {
             "type": "ap",
-            "name": "object_10_highlighted"
+            "name": "some_object_resting_on_8"
           }
         }
-      },
-      "notes": [
-        "This is an example grounded state invariant."
-      ]
+      }
+    },
+    {
+      "id": "prop.no_object_resting_on_10",
+      "natural_language": "No object is ever resting on object 10.",
+      "ltl": "G(!some_object_resting_on_10)",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "not",
+          "operand": {
+            "type": "ap",
+            "name": "some_object_resting_on_10"
+          }
+        }
+      }
+    },
+    {
+      "id": "prop.lowered_eventually_raised",
+      "natural_language": "Whenever the grasper is lowered, it is eventually not lowered again.",
+      "ltl": "G(grasper_lowered -> F(!grasper_lowered))",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "grasper_lowered"
+          },
+          "right": {
+            "type": "eventually",
+            "operand": {
+              "type": "not",
+              "operand": {
+                "type": "ap",
+                "name": "grasper_lowered"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "prop.closed_eventually_open",
+      "natural_language": "Whenever the grasper is closed, it is eventually not closed again.",
+      "ltl": "G(grasper_closed -> F(!grasper_closed))",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "grasper_closed"
+          },
+          "right": {
+            "type": "eventually",
+            "operand": {
+              "type": "not",
+              "operand": {
+                "type": "ap",
+                "name": "grasper_closed"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "prop.object_on_10_implies_next_closed",
+      "natural_language": "Whenever something is resting on object 10, the next state has the grasper closed.",
+      "ltl": "G(some_object_resting_on_10 -> X(grasper_closed))",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "some_object_resting_on_10"
+          },
+          "right": {
+            "type": "next",
+            "operand": {
+              "type": "ap",
+              "name": "grasper_closed"
+            }
+          }
+        }
+      }
     }
   ]
 }

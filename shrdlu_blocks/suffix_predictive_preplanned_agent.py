@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from shrdlu_blocks.agent import (
     DEFAULT_MAX_STEPS,
@@ -141,13 +141,14 @@ open_grasper:
 ## Output
 
 Fill the "reasoning" field in this order before writing ap_results:
-  1. grasped_object    — what object (if any) is currently held, from the action history delta.
-  2. precondition_check — does this action pass its precondition? If not, state no-change.
-  3. world_delta        — which fields change (grasper_lowered, grasper_closed, grasped_object, which resting_on)?
-  4. ap_derivation      — evaluate each AP formula against the resulting world state.
+  1. object_positions   — for every object in the world, state its current (x, y) position. Start from the initial world state and apply any move_grasper actions that moved a held object to derive the current position of each object.
+  2. grasped_object    — what object (if any) is currently held, from the action history delta.
+  3. precondition_check — does this action pass its precondition? If not, state no-change.
+  4. world_delta        — which fields change (grasper_lowered, grasper_closed, grasped_object, which resting_on)?
+  5. ap_derivation      — evaluate each AP formula against the resulting world state.
 
 Required JSON shape:
-{"reasoning": {"grasped_object": "...", "precondition_check": "...", "world_delta": "...", "ap_derivation": "..."}, "response": "...", "ap_results": {"<ap_name>": true, ...}}
+{"reasoning": {"object_positions": "...", "grasped_object": "...", "precondition_check": "...", "world_delta": "...", "ap_derivation": "..."}, "response": "...", "ap_results": {"<ap_name>": true, ...}}
 Return strict JSON only."""
 
 AP_STATE_PREDICTION_PROMPT_TEMPLATE = """\
@@ -177,12 +178,13 @@ AP_STATE_SCHEMA = {
         'reasoning': {
             'type': 'object',
             'properties': {
+                'object_positions': {'type': 'string'},
                 'grasped_object': {'type': 'string'},
                 'precondition_check': {'type': 'string'},
                 'world_delta': {'type': 'string'},
                 'ap_derivation': {'type': 'string'},
             },
-            'required': ['grasped_object', 'precondition_check', 'world_delta', 'ap_derivation'],
+            'required': ['object_positions', 'grasped_object', 'precondition_check', 'world_delta', 'ap_derivation'],
         },
         'response': {
             'type': 'string',
@@ -624,20 +626,10 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
           failure             — failure dict (if not passed)
           prediction_detail   — raw prediction info for trace logging
         """
-        prediction_prompt = self._build_ap_state_prediction_prompt(
-            current_ap_state=current_state,
-            action=action,
-            init_world_state=init_world_state,
-            accepted_trace=accepted_trace,
-        )
-        history = [
-            {'role': 'system', 'content': AP_STATE_PREDICTION_SYSTEM_PROMPT},
-            {'role': 'user', 'content': prediction_prompt},
-        ]
         try:
-            prediction_response, prediction_bundle, prediction_attempts = self._request_ap_state_prediction(
-                history,
-                current_state,
+            predicted_world_state, prediction_notes = self._predict_world_state_after_actions(
+                init_world_state,
+                accepted_trace + [action],
             )
         except Exception as exc:
             return {
@@ -651,16 +643,15 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                 'prediction_detail': {'error': str(exc)},
             }
 
-        predicted_ap_state = prediction_bundle['ap_results']
+        predicted_ap_state = self._build_initial_ap_state(predicted_world_state)
         full_ap_trace = preceding_ap_trace + [predicted_ap_state]
         tlc_result = verify_ap_trace(full_ap_trace, _AP_NAMES, is_complete_trace=is_last_step)
         passed = tlc_result['tlc_result'].get('success') or tlc_result['tlc_result'].get('skipped')
 
         detail = {
-            'prediction_prompt': prediction_prompt,
-            'prediction_response': prediction_response,
-            'prediction_attempts': prediction_attempts,
-            'prediction_summary': prediction_bundle.get('response', ''),
+            'prediction_source': 'deterministic_symbolic_replay',
+            'prediction_summary': '\n'.join(prediction_notes),
+            'predicted_world_state': predicted_world_state,
             'predicted_ap_state': predicted_ap_state,
             'predicted_ap_changes': self._diff_ap_states(current_state, predicted_ap_state),
             'tla_verification': tlc_result,
@@ -685,6 +676,175 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             'failure': None,
             'prediction_detail': detail,
         }
+
+    @classmethod
+    def _predict_world_state_after_actions(
+        cls,
+        init_world_state: Dict[str, object],
+        actions: List[Dict[str, object]],
+    ) -> Tuple[Dict[str, object], List[str]]:
+        """Replay primitive simulator effects into a predicted world snapshot."""
+        state = copy.deepcopy(init_world_state)
+        notes = []
+        for action in actions:
+            notes.append(cls._apply_symbolic_action(state, action))
+        return state, notes
+
+    @classmethod
+    def _apply_symbolic_action(
+        cls,
+        state: Dict[str, object],
+        action: Dict[str, object],
+    ) -> str:
+        name = action.get('name', '')
+        args = action.get('args', {}) or {}
+        grasper = cls._symbolic_grasper(state)
+        grasped_object = state.get('grasped_object')
+
+        if name == 'move_grasper':
+            if state.get('grasper_lowered') is True:
+                return 'move_grasper: precondition failed; grasper is lowered.'
+            pos = grasper.setdefault('position', {})
+            if 'x' in args:
+                pos['x'] = args.get('x')
+            if 'y' in args:
+                pos['y'] = args.get('y')
+            if grasped_object is not None:
+                held = cls._symbolic_object(state, grasped_object)
+                if held is not None:
+                    held_pos = held.setdefault('position', {})
+                    held_pos['x'] = pos.get('x')
+                    held_pos['y'] = pos.get('y')
+            return 'move_grasper: moved to (%s, %s).' % (pos.get('x'), pos.get('y'))
+
+        if name == 'lower_grasper':
+            if state.get('grasper_lowered') is True:
+                return 'lower_grasper: precondition failed; grasper is already lowered.'
+            target = cls._find_symbolic_object_below_grasper(state, exclude_obj_id=grasped_object)
+            target_id = target.get('obj_id') if target else None
+            state['grasper_lowered'] = True
+            grasper.setdefault('tags', {})['lowered'] = True
+            if grasped_object is None:
+                grasper['resting_on'] = target_id
+                grasper.setdefault('tags', {})['resting_on'] = target_id
+            else:
+                held = cls._symbolic_object(state, grasped_object)
+                if held is not None:
+                    held['resting_on'] = target_id
+                    held.setdefault('tags', {})['resting_on'] = target_id
+                    held_pos = held.setdefault('position', {})
+                    grasper_pos = grasper.get('position', {})
+                    held_pos['x'] = grasper_pos.get('x')
+                    held_pos['y'] = grasper_pos.get('y')
+            return 'lower_grasper: lowered onto obj %s.' % target_id
+
+        if name == 'raise_grasper':
+            if state.get('grasper_lowered') is not True:
+                return 'raise_grasper: precondition failed; grasper is already raised.'
+            state['grasper_lowered'] = False
+            grasper.setdefault('tags', {})['lowered'] = False
+            grasper['resting_on'] = None
+            grasper.setdefault('tags', {})['resting_on'] = None
+            if grasped_object is not None:
+                held = cls._symbolic_object(state, grasped_object)
+                if held is not None:
+                    held['resting_on'] = None
+                    held.setdefault('tags', {})['resting_on'] = None
+            return 'raise_grasper: raised.'
+
+        if name == 'close_grasper':
+            if state.get('grasper_closed') is True:
+                return 'close_grasper: precondition failed; grasper is already closed.'
+            state['grasper_closed'] = True
+            grasper.setdefault('tags', {})['closed'] = True
+            if state.get('grasper_lowered') is True:
+                target_id = grasper.get('resting_on')
+                target = cls._symbolic_object(state, target_id)
+                if target is not None and target.get('graspable'):
+                    state['grasped_object'] = target_id
+                    grasper.setdefault('tags', {})['grasped'] = target_id
+                    target['grasped_by'] = grasper.get('obj_id')
+                    target.setdefault('tags', {})['grasped_by'] = grasper.get('obj_id')
+            return 'close_grasper: closed.'
+
+        if name == 'open_grasper':
+            if state.get('grasper_closed') is not True:
+                return 'open_grasper: precondition failed; grasper is already open.'
+            if grasped_object is not None:
+                held = cls._symbolic_object(state, grasped_object)
+                support_id = held.get('resting_on') if held else None
+                support = cls._symbolic_object(state, support_id)
+                if state.get('grasper_lowered') is not True:
+                    return 'open_grasper: precondition failed; grasper is raised while holding obj %s.' % grasped_object
+                if support is None or not support.get('can_support'):
+                    return 'open_grasper: precondition failed; held obj %s is not on a valid support.' % grasped_object
+                if held is not None:
+                    held['grasped_by'] = None
+                    held.setdefault('tags', {})['grasped_by'] = None
+                state['grasped_object'] = None
+                grasper.setdefault('tags', {})['grasped'] = None
+            state['grasper_closed'] = False
+            grasper.setdefault('tags', {})['closed'] = False
+            return 'open_grasper: opened.'
+
+        return '%s: unknown action; no state change.' % name
+
+    @staticmethod
+    def _symbolic_grasper(state: Dict[str, object]) -> Dict[str, object]:
+        default_id = state.get('default_grasper', 0)
+        grasper = _SuffixPredictivePreplannedShrdluAgentMixin._symbolic_object(state, default_id)
+        if grasper is None:
+            raise ValueError('No grasper object found in world state.')
+        return grasper
+
+    @staticmethod
+    def _symbolic_object(
+        state: Dict[str, object],
+        obj_id: object,
+    ) -> Optional[Dict[str, object]]:
+        for obj in state.get('objects', []):
+            if isinstance(obj, dict) and obj.get('obj_id') == obj_id:
+                return obj
+        return None
+
+    @classmethod
+    def _find_symbolic_object_below_grasper(
+        cls,
+        state: Dict[str, object],
+        *,
+        exclude_obj_id: object = None,
+    ) -> Optional[Dict[str, object]]:
+        grasper = cls._symbolic_grasper(state)
+        grasper_pos = grasper.get('position', {})
+        gx = grasper_pos.get('x')
+        gy = grasper_pos.get('y')
+        if gx is None or gy is None:
+            return None
+
+        best = None
+        best_z = None
+        tol = 1e-4
+        grasper_id = grasper.get('obj_id')
+        for obj in state.get('objects', []):
+            if not isinstance(obj, dict):
+                continue
+            oid = obj.get('obj_id')
+            if oid in (grasper_id, exclude_obj_id):
+                continue
+            if obj.get('kind') == 'table':
+                continue
+            pos = obj.get('position', {})
+            ox = pos.get('x')
+            oy = pos.get('y')
+            if ox is None or oy is None:
+                continue
+            if abs(float(ox) - float(gx)) > tol or abs(float(oy) - float(gy)) > tol:
+                continue
+            z = float(pos.get('z', 0.0) or 0.0)
+            if best is None or z > best_z:
+                best = obj
+                best_z = z
+        return best
 
     def _build_suffix_plan_prompt(
         self,

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from shrdlu_blocks.env import ShrdluBlocksEnv
+from shrdlu_blocks.state_pred import predict_world_state_after_actions
 from shrdlu_blocks.suffix_predictive_preplanned_agent import (
     SuffixPredictivePreplannedOllamaShrdluAgent,
 )
@@ -75,7 +76,7 @@ class SuffixPredictivePreplannedAgentTests(unittest.TestCase):
             {'name': 'lower_grasper', 'args': {}},
         ]
 
-        predicted_world_state, _notes = agent._predict_world_state_after_actions(
+        predicted_world_state, _notes = predict_world_state_after_actions(
             initial_world_state,
             actions,
         )
@@ -110,7 +111,7 @@ class SuffixPredictivePreplannedAgentTests(unittest.TestCase):
         }
         actions = [{'name': 'lower_grasper', 'args': {}}]
 
-        predicted_world_state, _notes = agent._predict_world_state_after_actions(
+        predicted_world_state, _notes = predict_world_state_after_actions(
             initial_world_state,
             actions,
         )
@@ -144,7 +145,7 @@ class SuffixPredictivePreplannedAgentTests(unittest.TestCase):
         }
         actions = [{'name': 'lower_grasper', 'args': {}}]
 
-        predicted_world_state, _notes = agent._predict_world_state_after_actions(
+        predicted_world_state, _notes = predict_world_state_after_actions(
             initial_world_state,
             actions,
         )

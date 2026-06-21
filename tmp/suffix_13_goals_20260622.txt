@@ -1,0 +1,13 @@
+highlight the blue pyramid
+highlight the green pyramid
+highlight the red pyramid
+highlight the red small block
+highlight the green medium block
+highlight the red big block
+highlight the blue block
+highlight the green big block
+highlight the white box
+unhighlight the blue pyramid
+put the red small block on the green medium block
+put the red small block on the red big block
+put the red small block on the blue block

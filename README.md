@@ -9,6 +9,10 @@ The main pieces are:
 - `shrdlu_blocks.preplanned_ollama_demo`: the natural-language GUI that plans the full action sequence first
 - `shrdlu_blocks.openai_demo`: the natural-language GUI backed by an OpenAI-compatible API
 - `shrdlu_blocks.preplanned_openai_demo`: the plan-first OpenAI-compatible GUI
+- `shrdlu_blocks.predictive_preplanned_ollama_demo`: the tree-search predictive Ollama GUI
+- `shrdlu_blocks.predictive_preplanned_openai_demo`: the tree-search predictive OpenAI-compatible GUI
+- `shrdlu_blocks.suffix_predictive_preplanned_ollama_demo`: the suffix-replanning predictive Ollama GUI
+- `shrdlu_blocks.suffix_predictive_preplanned_openai_demo`: the suffix-replanning predictive OpenAI-compatible GUI
 - `shrdlu_blocks.env`: a reusable in-process environment wrapper
 - `shrdlu_blocks.agent`: the Ollama-backed agent loop
 
@@ -50,6 +54,60 @@ python3 -m shrdlu_blocks.preplanned_ollama_demo
 This variant reads the scene once, plans the entire action sequence up front, and then
 executes that stored plan without asking the model again after each action.
 
+## Predictive Preplanned Demo
+
+If you want a stronger planning mode that predicts the next state, verifies the properties,
+and retries or backtracks before any real execution, run:
+
+```bash
+source .venv/bin/activate
+python3 -m shrdlu_blocks.predictive_preplanned_ollama_demo
+```
+
+This variant:
+- plans one next action at a time
+- asks the model to predict the resulting symbolic next state
+- checks the predicted transition against the property set
+- retries or backtracks during planning if the predicted step violates properties
+- executes only after a full property-satisfying plan is found
+
+You can tune branch retries with:
+
+```bash
+export SHRDLU_AGENT_MAX_BRANCH_RETRIES=3
+```
+
+If you want the same predictive planning mode over the OpenAI-compatible backend, run:
+
+```bash
+source .venv/bin/activate
+python3 -m shrdlu_blocks.predictive_preplanned_openai_demo
+```
+
+## Suffix Predictive Preplanned Demo
+
+If you want a predictive planner that proposes the full remaining suffix, predicts along
+that suffix, and replans from the first predicted violation point, run:
+
+```bash
+source .venv/bin/activate
+python3 -m shrdlu_blocks.suffix_predictive_preplanned_ollama_demo
+```
+
+This variant:
+- plans the full remaining suffix instead of only the next action
+- predicts symbolic state changes step by step along that suffix
+- stops at the first predicted violation
+- keeps the verified prefix and replans the rest from the last valid predicted state
+- executes only after a full property-satisfying plan is found
+
+If you want the same suffix predictive mode over the OpenAI-compatible backend, run:
+
+```bash
+source .venv/bin/activate
+python3 -m shrdlu_blocks.suffix_predictive_preplanned_openai_demo
+```
+
 ## OpenAI-Compatible Demo
 
 To use a local OpenAI-compatible server like the example below:
@@ -72,8 +130,8 @@ python3 -m shrdlu_blocks.openai_demo
 
 The default OpenAI-compatible settings are:
 - base URL: `http://127.0.0.1:30000/v1`
-- API key: `None`
-- model: `Qwen/Qwen2.5-0.5B-Instruct`
+- API key: `EMPTY`
+- model: `Qwen/Qwen3-30B-A3B-Instruct-2507`
 - temperature: `0.2`
 - max tokens per chat call: `512`
 
@@ -88,8 +146,8 @@ You can override them with environment variables:
 
 ```bash
 export SHRDLU_OPENAI_BASE_URL=http://127.0.0.1:30000/v1
-export SHRDLU_OPENAI_API_KEY=None
-export SHRDLU_OPENAI_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+export SHRDLU_OPENAI_API_KEY=EMPTY
+export SHRDLU_OPENAI_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
 export SHRDLU_OPENAI_TEMPERATURE=0.2
 export SHRDLU_OPENAI_MAX_TOKENS=512
 python3 -m shrdlu_blocks.openai_demo
@@ -146,6 +204,10 @@ python3 -m shrdlu_blocks.demo
 - `shrdlu_blocks/preplanned_ollama_demo.py`: plan-first Ollama GUI entry point
 - `shrdlu_blocks/openai_demo.py`: OpenAI-compatible GUI entry point
 - `shrdlu_blocks/preplanned_openai_demo.py`: plan-first OpenAI-compatible GUI entry point
+- `shrdlu_blocks/predictive_preplanned_ollama_demo.py`: stepwise predictive Ollama GUI entry point
+- `shrdlu_blocks/predictive_preplanned_openai_demo.py`: stepwise predictive OpenAI-compatible GUI entry point
+- `shrdlu_blocks/suffix_predictive_preplanned_ollama_demo.py`: suffix-replanning predictive Ollama GUI entry point
+- `shrdlu_blocks/suffix_predictive_preplanned_openai_demo.py`: suffix-replanning predictive OpenAI-compatible GUI entry point
 
 ## Notes
 

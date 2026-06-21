@@ -149,6 +149,30 @@ class RetryTests(unittest.TestCase):
             self.assertEqual('finished', trace['status'])
             self.assertEqual('Done.', trace['final_message'])
 
+    def test_action_trace_records_property_verification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = OllamaShrdluAgent(ShrdluBlocksEnv(), trace_dir=tmpdir, max_steps=2)
+            replies = iter([
+                '{"response": "I will lower the grasper.", "action": {"name": "lower_grasper", "args": {}}}',
+                '{"response": "Done.", "action": {"name": "finish", "args": {}}}',
+            ])
+            agent._chat = lambda messages: next(replies)
+
+            result = agent.handle_user_input('lower the grasper')
+
+            self.assertEqual('Done.', result)
+            trace_files = list(Path(tmpdir).glob('trace_*.json'))
+            self.assertEqual(1, len(trace_files))
+            trace = json.loads(trace_files[0].read_text(encoding='utf-8'))
+            self.assertEqual(2, len(trace['steps']))
+            self.assertIn('property_monitoring', trace)
+            verification = trace['steps'][0]['property_verification']
+            self.assertTrue(verification['all_satisfied'])
+            self.assertIn('property_results', verification)
+            self.assertIn('derived_aps', verification)
+            self.assertIn('changed_properties', verification)
+            self.assertTrue(verification['derived_aps']['last_action_lower_grasper'])
+
     def test_openai_compatible_chat_returns_message_content(self):
         class FakeCompletions:
             @staticmethod

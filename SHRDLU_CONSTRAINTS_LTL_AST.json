@@ -2,98 +2,183 @@
   "metadata": {
     "source_files": [
       "shrdlu_blocks/control.py",
-      "shrdlu_blocks/env.py",
-      "shrdlu_blocks/scenes.py"
+      "shrdlu_blocks/env.py"
     ],
-    "logic_style": "finite-trace LTL AST",
+    "logic_style": "finite-trace LTL AST over static transition snapshots",
+    "state_model": {
+      "description": [
+        "Each trace element is a static transition snapshot, not a pure world state.",
+        "A snapshot may include:",
+        "1. facts about the state immediately before the executed primitive action",
+        "2. the identity of the last executed primitive action",
+        "3. facts about the state immediately after that action"
+      ],
+      "reason": [
+        "This keeps atomic propositions static and symbolic.",
+        "It also lets preconditions and effects be stated without using request-style APs."
+      ]
+    },
     "notes": [
-      "Atomic propositions are schematic and parameterized by the verifier.",
-      "Parameterized APs are marked with 'parameterized': true — they are implicitly quantified over an object or grasper ID and cannot be treated as ground propositions.",
-      "Effect rules state what becomes true in the next state; they do not encode frame conditions (unchanged fluents). A closed-world assumption over fluents is required for a complete verifier.",
-      "Two API layers are distinguished: 'env.*' rules apply at the ShrdluBlocksEnv.execute_action boundary; 'ctrl.*' rules apply at the Controller method boundary. The env layer is stricter on argument types.",
-      "The X (next) operator always references the same base AP names as the current-state vocabulary; no shadow 'next_*' propositions are used."
+      "The AP names are intentionally simple and compositional.",
+      "Geometry-dependent concepts are abstracted into derived APs that a Python verifier should compute.",
+      "The primitive actions match the simulator/environment API exactly: move_grasper, lower_grasper, raise_grasper, close_grasper, open_grasper, highlight_object, unhighlight_object."
     ]
   },
   "atomic_propositions": [
-    { "name": "move_requested",         "parameterized": false, "description": "A move_grasper action was issued this step." },
-    { "name": "lower_requested",        "parameterized": false, "description": "A lower_grasper action was issued this step." },
-    { "name": "raise_requested",        "parameterized": false, "description": "A raise_grasper action was issued this step." },
-    { "name": "close_requested",        "parameterized": false, "description": "A close_grasper action was issued this step." },
-    { "name": "open_requested",         "parameterized": false, "description": "A open_grasper action was issued this step." },
-    { "name": "highlight_requested",    "parameterized": false, "description": "A highlight_object action was issued this step." },
-    { "name": "unhighlight_requested",  "parameterized": false, "description": "An unhighlight_object action was issued this step." },
-    { "name": "explicit_grasper_id_supplied", "parameterized": false, "description": "The caller passed an explicit grasper_id argument (not relying on the default)." },
-    { "name": "grasper_exists",         "parameterized": false, "description": "At least one grasper object exists in the scene (or a valid default grasper is set)." },
-    { "name": "object_exists",          "parameterized": true,  "description": "The referenced obj_id corresponds to an existing object in the scene." },
-    { "name": "referenced_object_is_grasper", "parameterized": true, "description": "The explicitly supplied grasper_id refers to an object whose kind tag is 'grasper'." },
-    { "name": "lowered",                "parameterized": false, "description": "The active grasper's 'lowered' tag is True." },
-    { "name": "closed",                 "parameterized": false, "description": "The active grasper's 'closed' tag is True." },
-    { "name": "holding",                "parameterized": false, "description": "The active grasper's 'grasped' tag is non-None (it holds an object)." },
-    { "name": "has_numeric_x",          "parameterized": false, "description": "The x argument to move_grasper is an int or float (not None, not a non-numeric type)." },
-    { "name": "has_numeric_y",          "parameterized": false, "description": "The y argument to move_grasper is an int or float (not None, not a non-numeric type)." },
-    { "name": "has_integer_obj_id",     "parameterized": false, "description": "The obj_id argument is a Python int." },
-    { "name": "target_x_in_bounds",     "parameterized": false, "description": "The x argument (if given) satisfies min_x <= x <= max_x for the grasper." },
-    { "name": "target_y_in_bounds",     "parameterized": false, "description": "The y argument (if given) satisfies min_y <= y <= max_y for the grasper." },
-    { "name": "grasper_centered_over_object", "parameterized": true, "description": "The horizontal distance from the grasper position to the target object's center of mass is within grasper_distance_tolerance. Only when this holds is grasper.tags['resting_on'] set after lowering." },
-    { "name": "grasper_resting_on_graspable", "parameterized": false, "description": "After lowering, the grasper's 'resting_on' tag is set AND the object it names has graspable=True." },
-    { "name": "target_graspable",       "parameterized": true,  "description": "The object directly below the grasper has graspable=True in its tags." },
-    { "name": "held_obj_resting_on_target", "parameterized": true, "description": "The held object's own 'resting_on' tag is non-None (set when the held object was lowered onto a supporting surface)." },
-    { "name": "target_can_support_held", "parameterized": true, "description": "can_support(target, held_obj) is True: target has can_support=True AND (for boxes) all salient points of the held object fall within the box footprint." },
-    { "name": "held_object_xy_matches_grasper_xy", "parameterized": false, "description": "After a move, the held object's (x, y) equals the grasper's (x, y)." },
-    { "name": "grasper_clears_scene",   "parameterized": false, "description": "After raising, the grasper (and any held object) is at a z-height strictly above the highest stable point in the scene." },
-    { "name": "grasper_resting_on_is_null", "parameterized": false, "description": "The grasper's 'resting_on' tag is None." },
-    { "name": "held_obj_resting_on_is_null", "parameterized": false, "description": "The held object's 'resting_on' tag is None (cleared after raising)." },
-    { "name": "grasper_lowered_onto_highest_below_or_ground", "parameterized": false, "description": "After lowering, the grasper (or held object base) z-coordinate equals the height of the highest object directly below, or 0 if none." }
+    {
+      "name": "last_action_is_move_grasper",
+      "description": "The last executed primitive action was move_grasper."
+    },
+    {
+      "name": "last_action_is_lower_grasper",
+      "description": "The last executed primitive action was lower_grasper."
+    },
+    {
+      "name": "last_action_is_raise_grasper",
+      "description": "The last executed primitive action was raise_grasper."
+    },
+    {
+      "name": "last_action_is_close_grasper",
+      "description": "The last executed primitive action was close_grasper."
+    },
+    {
+      "name": "last_action_is_open_grasper",
+      "description": "The last executed primitive action was open_grasper."
+    },
+    {
+      "name": "last_action_is_highlight_object",
+      "description": "The last executed primitive action was highlight_object."
+    },
+    {
+      "name": "last_action_is_unhighlight_object",
+      "description": "The last executed primitive action was unhighlight_object."
+    },
+    {
+      "name": "explicit_grasper_id_supplied",
+      "description": "This transition uses an explicit grasper_id argument rather than relying on the default grasper."
+    },
+    {
+      "name": "pre_grasper_exists",
+      "description": "Before the action, a valid active grasper exists."
+    },
+    {
+      "name": "pre_object_exists",
+      "description": "Before the action, the referenced object id exists."
+    },
+    {
+      "name": "pre_explicit_grasper_ref_is_valid_grasper",
+      "description": "Before the action, any explicit grasper id refers to an object of kind=grasper."
+    },
+    {
+      "name": "pre_grasper_lowered",
+      "description": "Before the action, the active grasper is lowered."
+    },
+    {
+      "name": "pre_grasper_closed",
+      "description": "Before the action, the active grasper is closed."
+    },
+    {
+      "name": "pre_grasper_holding_object",
+      "description": "Before the action, the active grasper is holding some object."
+    },
+    {
+      "name": "pre_move_has_x",
+      "description": "Before move_grasper, the action arguments include a numeric x."
+    },
+    {
+      "name": "pre_move_has_y",
+      "description": "Before move_grasper, the action arguments include a numeric y."
+    },
+    {
+      "name": "pre_move_x_in_bounds",
+      "description": "Before move_grasper, the provided x is within bounds."
+    },
+    {
+      "name": "pre_move_y_in_bounds",
+      "description": "Before move_grasper, the provided y is within bounds."
+    },
+    {
+      "name": "pre_obj_id_is_integer",
+      "description": "Before highlight/unhighlight, obj_id is an integer at the env layer."
+    },
+    {
+      "name": "pre_grasper_resting_on_graspable",
+      "description": "Before close_grasper, the lowered grasper is resting on a graspable object."
+    },
+    {
+      "name": "pre_held_object_resting_on_support",
+      "description": "Before open_grasper while holding, the held object's resting_on tag is not null."
+    },
+    {
+      "name": "pre_support_can_hold_object",
+      "description": "Before open_grasper while holding, the supporting object can support the held object."
+    },
+    {
+      "name": "post_grasper_lowered",
+      "description": "After the action, the active grasper is lowered."
+    },
+    {
+      "name": "post_grasper_closed",
+      "description": "After the action, the active grasper is closed."
+    },
+    {
+      "name": "post_grasper_holding_object",
+      "description": "After the action, the active grasper is holding some object."
+    },
+    {
+      "name": "post_held_object_xy_matches_grasper_xy",
+      "description": "After a move while holding, the held object's x,y matches the grasper's x,y."
+    },
+    {
+      "name": "post_grasper_clears_scene",
+      "description": "After raise_grasper, the grasper is high enough to clear the scene."
+    },
+    {
+      "name": "post_grasper_resting_on_is_null",
+      "description": "After the action, the grasper's resting_on tag is null."
+    },
+    {
+      "name": "post_held_object_resting_on_is_null",
+      "description": "After the action, the held object's resting_on tag is null."
+    },
+    {
+      "name": "post_lowered_onto_highest_support_or_ground",
+      "description": "After lower_grasper, the grasper or held object is lowered onto the highest support below or the ground."
+    }
   ],
   "rules": [
     {
       "id": "env.move_grasper.requires_numeric_x_and_y",
       "layer": "env",
-      "source": "shrdlu_blocks/env.py:111-114",
-      "natural_language": "At the env API layer, move_grasper requires both x and y to be numeric (int or float). Both are mandatory; neither may be omitted or non-numeric.",
+      "natural_language": "At the env layer, move_grasper is only legal when both x and y are numeric.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
-          "left": { "type": "ap", "name": "move_requested" },
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_move_grasper"
+          },
           "right": {
             "type": "and",
             "args": [
-              { "type": "ap", "name": "has_numeric_x" },
-              { "type": "ap", "name": "has_numeric_y" }
+              {
+                "type": "ap",
+                "name": "pre_move_has_x"
+              },
+              {
+                "type": "ap",
+                "name": "pre_move_has_y"
+              }
             ]
           }
         }
       }
-    },
-    {
-      "id": "ctrl.move_grasper.requires_at_least_one_coordinate",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:133-134",
-      "natural_language": "At the controller layer, move_grasper requires at least one of x or y to be non-None. (Both being None is an error; one may be None and takes its current value.)",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "move_requested" },
-          "right": {
-            "type": "or",
-            "args": [
-              { "type": "ap", "name": "has_numeric_x" },
-              { "type": "ap", "name": "has_numeric_y" }
-            ]
-          }
-        }
-      },
-      "notes": [
-        "This is weaker than the env-layer rule. The env layer always passes both; the controller alone accepts one."
-      ]
     },
     {
       "id": "env.highlight_requires_integer_obj_id",
       "layer": "env",
-      "source": "shrdlu_blocks/env.py:123-128",
-      "natural_language": "highlight_object and unhighlight_object require an integer obj_id at the env API layer.",
+      "natural_language": "At the env layer, highlight and unhighlight require an integer obj_id.",
       "ast": {
         "type": "globally",
         "operand": {
@@ -101,19 +186,27 @@
           "left": {
             "type": "or",
             "args": [
-              { "type": "ap", "name": "highlight_requested" },
-              { "type": "ap", "name": "unhighlight_requested" }
+              {
+                "type": "ap",
+                "name": "last_action_is_highlight_object"
+              },
+              {
+                "type": "ap",
+                "name": "last_action_is_unhighlight_object"
+              }
             ]
           },
-          "right": { "type": "ap", "name": "has_integer_obj_id" }
+          "right": {
+            "type": "ap",
+            "name": "pre_obj_id_is_integer"
+          }
         }
       }
     },
     {
-      "id": "ctrl.grasper_must_exist",
+      "id": "ctrl.grasper_action_requires_existing_grasper",
       "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:288-299",
-      "natural_language": "Any grasper action (move, lower, raise, close, open) requires a valid grasper to be present in the scene.",
+      "natural_language": "Any grasper primitive requires an existing grasper before execution.",
       "ast": {
         "type": "globally",
         "operand": {
@@ -121,367 +214,111 @@
           "left": {
             "type": "or",
             "args": [
-              { "type": "ap", "name": "move_requested" },
-              { "type": "ap", "name": "lower_requested" },
-              { "type": "ap", "name": "raise_requested" },
-              { "type": "ap", "name": "close_requested" },
-              { "type": "ap", "name": "open_requested" }
+              {
+                "type": "ap",
+                "name": "last_action_is_move_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "last_action_is_lower_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "last_action_is_raise_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "last_action_is_close_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "last_action_is_open_grasper"
+              }
             ]
           },
-          "right": { "type": "ap", "name": "grasper_exists" }
+          "right": {
+            "type": "ap",
+            "name": "pre_grasper_exists"
+          }
         }
       }
     },
     {
-      "id": "ctrl.explicit_grasper_id_must_be_grasper",
+      "id": "ctrl.explicit_grasper_reference_must_be_valid",
       "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:255-270",
-      "natural_language": "If an explicit grasper_id is supplied, the referenced object must have kind='grasper'.",
+      "natural_language": "If an explicit grasper id is used, it must refer to a real grasper.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
-          "left": { "type": "ap", "name": "explicit_grasper_id_supplied" },
-          "right": { "type": "ap", "name": "referenced_object_is_grasper" }
+          "left": {
+            "type": "ap",
+            "name": "explicit_grasper_id_supplied"
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_explicit_grasper_ref_is_valid_grasper"
+          }
         }
-      }
+      },
+      "notes": [
+        "This rule uses an AP that the verifier may synthesize only when an explicit grasper id exists."
+      ]
     },
     {
       "id": "ctrl.highlight_requires_existing_object",
       "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:310-317",
-      "natural_language": "highlight_object and unhighlight_object require the referenced obj_id to correspond to an existing object.",
+      "natural_language": "Highlighting actions require the referenced object to exist before execution.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
           "left": {
-            "type": "or",
-            "args": [
-              { "type": "ap", "name": "highlight_requested" },
-              { "type": "ap", "name": "unhighlight_requested" }
-            ]
-          },
-          "right": { "type": "ap", "name": "object_exists" }
-        }
-      }
-    },
-    {
-      "id": "ctrl.move_requires_raised_grasper",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:131-132",
-      "natural_language": "move_grasper requires the grasper to not be lowered.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "move_requested" },
-          "right": {
-            "type": "not",
-            "operand": { "type": "ap", "name": "lowered" }
-          }
-        }
-      }
-    },
-    {
-      "id": "ctrl.move_requires_x_in_bounds",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:135-136",
-      "natural_language": "If x is specified for move_grasper, it must lie within the grasper's [min_x, max_x] bounds.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "move_requested" },
-              { "type": "ap", "name": "has_numeric_x" }
-            ]
-          },
-          "right": { "type": "ap", "name": "target_x_in_bounds" }
-        }
-      }
-    },
-    {
-      "id": "ctrl.move_requires_y_in_bounds",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:137-138",
-      "natural_language": "If y is specified for move_grasper, it must lie within the grasper's [min_y, max_y] bounds.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "move_requested" },
-              { "type": "ap", "name": "has_numeric_y" }
-            ]
-          },
-          "right": { "type": "ap", "name": "target_y_in_bounds" }
-        }
-      }
-    },
-    {
-      "id": "ctrl.lower_requires_currently_raised",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:157-158",
-      "natural_language": "lower_grasper requires the grasper to currently be raised (not lowered).",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "lower_requested" },
-          "right": {
-            "type": "not",
-            "operand": { "type": "ap", "name": "lowered" }
-          }
-        }
-      }
-    },
-    {
-      "id": "ctrl.raise_requires_currently_lowered",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:191-192",
-      "natural_language": "raise_grasper requires the grasper to currently be lowered.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "raise_requested" },
-          "right": { "type": "ap", "name": "lowered" }
-        }
-      }
-    },
-    {
-      "id": "ctrl.close_requires_currently_open",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:79-80",
-      "natural_language": "close_grasper requires the grasper to currently be open (not closed).",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "close_requested" },
-          "right": {
-            "type": "not",
-            "operand": { "type": "ap", "name": "closed" }
-          }
-        }
-      }
-    },
-    {
-      "id": "ctrl.open_requires_currently_closed",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:98-99",
-      "natural_language": "open_grasper requires the grasper to currently be closed.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "open_requested" },
-          "right": { "type": "ap", "name": "closed" }
-        }
-      }
-    },
-    {
-      "id": "ctrl.open_holding_requires_lowered",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:103-104",
-      "natural_language": "If open_grasper is called while holding an object, the grasper must be lowered first.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "open_requested" },
-              { "type": "ap", "name": "holding" }
-            ]
-          },
-          "right": { "type": "ap", "name": "lowered" }
-        }
-      }
-    },
-    {
-      "id": "ctrl.open_holding_requires_held_obj_resting_on_target",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:106-109",
-      "natural_language": "If opening while holding, the HELD OBJECT's own 'resting_on' tag must be non-None — i.e., the held object (not the grasper) must be resting on a surface.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "open_requested" },
-              { "type": "ap", "name": "holding" }
-            ]
-          },
-          "right": { "type": "ap", "name": "held_obj_resting_on_target" }
-        }
-      },
-      "notes": [
-        "This checks grasped_obj.tags['resting_on'], not grasper.tags['resting_on']. The two are distinct. The previous version used the ambiguous 'resting_on_target' AP which did not make this distinction."
-      ]
-    },
-    {
-      "id": "ctrl.open_holding_requires_supporting_surface",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:110-113",
-      "natural_language": "If opening while holding, the surface the held object is resting on must be able to support it: can_support=True and (for boxes) all salient points of the held object must fall within the box footprint.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "open_requested" },
-              { "type": "ap", "name": "holding" }
-            ]
-          },
-          "right": { "type": "ap", "name": "target_can_support_held" }
-        }
-      },
-      "notes": [
-        "target_can_support_held encodes scenes.py:85-96: can_support=True AND, for box targets, all salient points of the held object lie inside the box footprint (not just the center of mass).",
-        "Pyramids always have can_support=False and can never be drop targets.",
-        "The box has a stricter full-footprint check; plain blocks only check whether the held object's center of mass is within the target's footprint."
-      ]
-    },
-    {
-      "id": "ctrl.close_grasp_requires_graspable_object",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:84-89",
-      "natural_language": "Closing while lowered and centered can only begin grasping if the object below has graspable=True. Objects with graspable=False (e.g. the box, the table) cannot be grasped.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "close_requested" },
-              { "type": "ap", "name": "lowered" }
-            ]
-          },
-          "right": {
             "type": "or",
             "args": [
               {
-                "type": "not",
-                "operand": { "type": "ap", "name": "grasper_resting_on_graspable" }
+                "type": "ap",
+                "name": "last_action_is_highlight_object"
               },
               {
-                "type": "next",
-                "operand": { "type": "ap", "name": "holding" }
+                "type": "ap",
+                "name": "last_action_is_unhighlight_object"
               }
-            ]
-          }
-        }
-      },
-      "notes": [
-        "Reads as: if close while lowered, then either the object below is not graspable (in which case grasping simply does not start) or the next state has holding=True.",
-        "A close on a non-graspable object still succeeds mechanically — it just does not begin grasping. The closed state is set regardless."
-      ]
-    },
-    {
-      "id": "ctrl.close_grasp_requires_centered_within_tolerance",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:168-171",
-      "natural_language": "Even if the grasper is lowered onto a graspable object, grasping only succeeds if the horizontal distance from the grasper to the object's center of mass is within grasper_distance_tolerance. Only then is grasper.tags['resting_on'] set, which is the gate for the grasp.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "close_requested" },
-              { "type": "ap", "name": "lowered" },
-              { "type": "ap", "name": "target_graspable" }
             ]
           },
           "right": {
-            "type": "or",
-            "args": [
-              {
-                "type": "not",
-                "operand": { "type": "ap", "name": "grasper_centered_over_object" }
-              },
-              {
-                "type": "next",
-                "operand": { "type": "ap", "name": "holding" }
-              }
-            ]
-          }
-        }
-      },
-      "notes": [
-        "grasper_centered_over_object is a geometry AP: horizontal_distance(grasper.position, object.position) <= grasper_distance_tolerance.",
-        "If not centered, grasper.tags['resting_on'] is None even though a graspable object is below, so grasping does not begin."
-      ]
-    },
-    {
-      "id": "effect.close_always_sets_closed",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:90",
-      "natural_language": "Any successful close_grasper call sets closed=True in the next state, regardless of whether grasping occurs.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "close_requested" },
-          "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "closed" }
+            "type": "ap",
+            "name": "pre_object_exists"
           }
         }
       }
     },
     {
-      "id": "effect.close_on_centered_graspable_target_starts_holding",
+      "id": "ctrl.move_requires_grasper_raised",
       "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:84-89",
-      "natural_language": "Closing while lowered, centered over a graspable object (resting_on tag is set) yields closed=True and holding=True in the next state.",
+      "natural_language": "move_grasper is only legal when the grasper is raised beforehand.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
           "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "close_requested" },
-              { "type": "ap", "name": "lowered" },
-              { "type": "ap", "name": "grasper_resting_on_graspable" }
-            ]
+            "type": "ap",
+            "name": "last_action_is_move_grasper"
           },
           "right": {
-            "type": "next",
+            "type": "not",
             "operand": {
-              "type": "and",
-              "args": [
-                { "type": "ap", "name": "closed" },
-                { "type": "ap", "name": "holding" }
-              ]
+              "type": "ap",
+              "name": "pre_grasper_lowered"
             }
           }
         }
-      },
-      "notes": [
-        "This is a refinement of effect.close_always_sets_closed: the grasp subcase.",
-        "grasper_resting_on_graspable is the conjunction of grasper.tags['resting_on'] being non-None AND the named object having graspable=True — both conditions in control.py:84-87."
-      ]
+      }
     },
     {
-      "id": "effect.open_releases_held_object_when_valid",
+      "id": "ctrl.move_requires_x_in_bounds_when_present",
       "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:114-118",
-      "natural_language": "Opening while closed, lowered, holding, and with the held object resting on a supporting surface releases the object: next state has closed=False and holding=False.",
+      "natural_language": "If move_grasper uses x, that x must already satisfy the allowed bounds.",
       "ast": {
         "type": "globally",
         "operand": {
@@ -489,226 +326,403 @@
           "left": {
             "type": "and",
             "args": [
-              { "type": "ap", "name": "open_requested" },
-              { "type": "ap", "name": "closed" },
-              { "type": "ap", "name": "lowered" },
-              { "type": "ap", "name": "holding" },
-              { "type": "ap", "name": "held_obj_resting_on_target" },
-              { "type": "ap", "name": "target_can_support_held" }
+              {
+                "type": "ap",
+                "name": "last_action_is_move_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_move_has_x"
+              }
             ]
           },
           "right": {
-            "type": "next",
+            "type": "ap",
+            "name": "pre_move_x_in_bounds"
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.move_requires_y_in_bounds_when_present",
+      "layer": "ctrl",
+      "natural_language": "If move_grasper uses y, that y must already satisfy the allowed bounds.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "and",
+            "args": [
+              {
+                "type": "ap",
+                "name": "last_action_is_move_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_move_has_y"
+              }
+            ]
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_move_y_in_bounds"
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.lower_requires_grasper_raised",
+      "layer": "ctrl",
+      "natural_language": "lower_grasper is only legal when the grasper is raised beforehand.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_lower_grasper"
+          },
+          "right": {
+            "type": "not",
             "operand": {
-              "type": "and",
-              "args": [
-                {
-                  "type": "not",
-                  "operand": { "type": "ap", "name": "closed" }
-                },
-                {
-                  "type": "not",
-                  "operand": { "type": "ap", "name": "holding" }
+              "type": "ap",
+              "name": "pre_grasper_lowered"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.raise_requires_grasper_lowered",
+      "layer": "ctrl",
+      "natural_language": "raise_grasper is only legal when the grasper is lowered beforehand.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_raise_grasper"
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_grasper_lowered"
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.close_requires_grasper_open",
+      "layer": "ctrl",
+      "natural_language": "close_grasper is only legal when the grasper is open beforehand.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_close_grasper"
+          },
+          "right": {
+            "type": "not",
+            "operand": {
+              "type": "ap",
+              "name": "pre_grasper_closed"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.open_requires_grasper_closed",
+      "layer": "ctrl",
+      "natural_language": "open_grasper is only legal when the grasper is closed beforehand.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_open_grasper"
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_grasper_closed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.open_while_holding_requires_lowered",
+      "layer": "ctrl",
+      "natural_language": "If open_grasper is executed while holding an object, the grasper must already be lowered.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "and",
+            "args": [
+              {
+                "type": "ap",
+                "name": "last_action_is_open_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_grasper_holding_object"
+              }
+            ]
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_grasper_lowered"
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.open_while_holding_requires_support_contact",
+      "layer": "ctrl",
+      "natural_language": "If open_grasper is executed while holding an object, the held object must already be resting on some support.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "and",
+            "args": [
+              {
+                "type": "ap",
+                "name": "last_action_is_open_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_grasper_holding_object"
+              }
+            ]
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_held_object_resting_on_support"
+          }
+        }
+      }
+    },
+    {
+      "id": "ctrl.open_while_holding_requires_support_compatibility",
+      "layer": "ctrl",
+      "natural_language": "If open_grasper is executed while holding an object, the support below must be able to support the held object.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "and",
+            "args": [
+              {
+                "type": "ap",
+                "name": "last_action_is_open_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_grasper_holding_object"
+              }
+            ]
+          },
+          "right": {
+            "type": "ap",
+            "name": "pre_support_can_hold_object"
+          }
+        }
+      }
+    },
+    {
+      "id": "effect.close_sets_closed",
+      "natural_language": "After close_grasper, the grasper is closed.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_close_grasper"
+          },
+          "right": {
+            "type": "ap",
+            "name": "post_grasper_closed"
+          }
+        }
+      }
+    },
+    {
+      "id": "effect.close_on_graspable_support_starts_holding",
+      "natural_language": "If close_grasper is executed while lowered on a graspable support, the grasper holds an object afterward.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "and",
+            "args": [
+              {
+                "type": "ap",
+                "name": "last_action_is_close_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_grasper_lowered"
+              },
+              {
+                "type": "ap",
+                "name": "pre_grasper_resting_on_graspable"
+              }
+            ]
+          },
+          "right": {
+            "type": "ap",
+            "name": "post_grasper_holding_object"
+          }
+        }
+      }
+    },
+    {
+      "id": "effect.open_releases_and_opens",
+      "natural_language": "After a valid open_grasper, the grasper is open; if it was holding an object, it no longer is.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_open_grasper"
+          },
+          "right": {
+            "type": "and",
+            "args": [
+              {
+                "type": "not",
+                "operand": {
+                  "type": "ap",
+                  "name": "post_grasper_closed"
                 }
-              ]
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "effect.open_empty_grasper_just_opens",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:98-99, 118",
-      "natural_language": "Opening a closed but empty grasper (not holding) sets closed=False in the next state.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "open_requested" },
-              { "type": "ap", "name": "closed" },
+              },
               {
-                "type": "not",
-                "operand": { "type": "ap", "name": "holding" }
+                "type": "implies",
+                "left": {
+                  "type": "ap",
+                  "name": "pre_grasper_holding_object"
+                },
+                "right": {
+                  "type": "not",
+                  "operand": {
+                    "type": "ap",
+                    "name": "post_grasper_holding_object"
+                  }
+                }
               }
             ]
+          }
+        }
+      },
+      "notes": [
+        "This nested implication is an AST-level shorthand over the same static transition snapshot."
+      ]
+    },
+    {
+      "id": "effect.lower_sets_lowered",
+      "natural_language": "After lower_grasper, the grasper is lowered.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_lower_grasper"
           },
           "right": {
-            "type": "next",
+            "type": "ap",
+            "name": "post_grasper_lowered"
+          }
+        }
+      }
+    },
+    {
+      "id": "effect.raise_clears_lowered_flag",
+      "natural_language": "After raise_grasper, the grasper is no longer lowered.",
+      "ast": {
+        "type": "globally",
+        "operand": {
+          "type": "implies",
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_raise_grasper"
+          },
+          "right": {
+            "type": "not",
             "operand": {
-              "type": "not",
-              "operand": { "type": "ap", "name": "closed" }
+              "type": "ap",
+              "name": "post_grasper_lowered"
             }
           }
         }
       }
     },
     {
-      "id": "effect.lower_sets_lowered_true",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:182",
-      "natural_language": "lower_grasper sets lowered=True in the next state.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "lower_requested" },
-          "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "lowered" }
-          }
-        }
-      }
-    },
-    {
-      "id": "effect.lower_grasper_rests_on_highest_below_or_ground",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:162-167",
-      "natural_language": "After lowering (empty grasper), the grasper's z-coordinate equals the height of the highest object directly below it, or 0 if none exists.",
+      "id": "effect.raise_clears_resting_on_tags",
+      "natural_language": "After raise_grasper, the grasper resting_on tag is null; if holding an object, the held object's resting_on tag is also null.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
           "left": {
+            "type": "ap",
+            "name": "last_action_is_raise_grasper"
+          },
+          "right": {
             "type": "and",
             "args": [
-              { "type": "ap", "name": "lower_requested" },
               {
-                "type": "not",
-                "operand": { "type": "ap", "name": "holding" }
+                "type": "ap",
+                "name": "post_grasper_resting_on_is_null"
+              },
+              {
+                "type": "implies",
+                "left": {
+                  "type": "ap",
+                  "name": "pre_grasper_holding_object"
+                },
+                "right": {
+                  "type": "ap",
+                  "name": "post_held_object_resting_on_is_null"
+                }
               }
             ]
-          },
-          "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "grasper_lowered_onto_highest_below_or_ground" }
-          }
-        }
-      },
-      "notes": [
-        "When not holding, the grasper's position is set to (x, y, target_height) where target_height is the highest point of the object directly below, or 0."
-      ]
-    },
-    {
-      "id": "effect.lower_held_object_rests_on_highest_below_or_ground",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:173-181",
-      "natural_language": "After lowering while holding, the held object's base z-coordinate equals the height of the highest object directly below the grasper, or 0 if none.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "lower_requested" },
-              { "type": "ap", "name": "holding" }
-            ]
-          },
-          "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "grasper_lowered_onto_highest_below_or_ground" }
-          }
-        }
-      },
-      "notes": [
-        "The grasper's z is set to target_height + height_of_held_object; the held object's z is set to target_height.",
-        "The held object acquires resting_on = target only if target is non-None. If lowered over empty space, resting_on stays None."
-      ]
-    },
-    {
-      "id": "effect.lower_sets_resting_on_only_if_centered",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:168-171, 179-181",
-      "natural_language": "lower_grasper only sets the grasper's (or held object's) 'resting_on' tag if the grasper is horizontally centered over the object below within grasper_distance_tolerance. If not centered, 'resting_on' remains None even though the grasper has physically descended.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "lower_requested" },
-          "right": {
-            "type": "next",
-            "operand": {
-              "type": "or",
-              "args": [
-                { "type": "ap", "name": "grasper_centered_over_object" },
-                { "type": "ap", "name": "grasper_resting_on_is_null" }
-              ]
-            }
-          }
-        }
-      },
-      "notes": [
-        "Equivalently: NOT grasper_centered_over_object → X(grasper_resting_on_is_null).",
-        "This distinction matters for close_grasper: if resting_on is not set, closing while lowered will not begin grasping even if a graspable object is physically below."
-      ]
-    },
-    {
-      "id": "effect.raise_sets_lowered_false",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:204",
-      "natural_language": "raise_grasper sets lowered=False in the next state.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "raise_requested" },
-          "right": {
-            "type": "next",
-            "operand": {
-              "type": "not",
-              "operand": { "type": "ap", "name": "lowered" }
-            }
           }
         }
       }
     },
     {
       "id": "effect.raise_clears_scene",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:193, 196, 200-202",
-      "natural_language": "raise_grasper positions the grasper (and any held object) at a height strictly above the highest stable point in the scene.",
+      "natural_language": "After raise_grasper, the grasper clears the scene.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
-          "left": { "type": "ap", "name": "raise_requested" },
+          "left": {
+            "type": "ap",
+            "name": "last_action_is_raise_grasper"
+          },
           "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "grasper_clears_scene" }
-          }
-        }
-      },
-      "notes": [
-        "Stable height is computed over all objects excluding the grasper itself and objects currently grasped (control.py:347).",
-        "The grasper z is set to minimum_height = max_stable_z + 0.1. When holding, the held object base is at minimum_height and the grasper is at the held object's highest point."
-      ]
-    },
-    {
-      "id": "effect.raise_clears_grasper_resting_on",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:197",
-      "natural_language": "raise_grasper sets grasper.tags['resting_on'] = None in the next state.",
-      "ast": {
-        "type": "globally",
-        "operand": {
-          "type": "implies",
-          "left": { "type": "ap", "name": "raise_requested" },
-          "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "grasper_resting_on_is_null" }
+            "type": "ap",
+            "name": "post_grasper_clears_scene"
           }
         }
       }
     },
     {
-      "id": "effect.raise_clears_held_object_resting_on",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:203",
-      "natural_language": "If raise_grasper is called while holding an object, that object's 'resting_on' tag is also cleared to None in the next state.",
+      "id": "effect.move_while_holding_transports_held_object",
+      "natural_language": "After move_grasper while holding an object, the held object's x,y matches the grasper's x,y.",
       "ast": {
         "type": "globally",
         "operand": {
@@ -716,69 +730,55 @@
           "left": {
             "type": "and",
             "args": [
-              { "type": "ap", "name": "raise_requested" },
-              { "type": "ap", "name": "holding" }
+              {
+                "type": "ap",
+                "name": "last_action_is_move_grasper"
+              },
+              {
+                "type": "ap",
+                "name": "pre_grasper_holding_object"
+              }
             ]
           },
           "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "held_obj_resting_on_is_null" }
+            "type": "ap",
+            "name": "post_held_object_xy_matches_grasper_xy"
           }
         }
       }
     },
     {
-      "id": "effect.move_with_holding_transports_object",
-      "layer": "ctrl",
-      "source": "shrdlu_blocks/control.py:141-146",
-      "natural_language": "Moving while holding transports the held object so that its (x, y) matches the grasper's (x, y) in the next state.",
+      "id": "effect.lower_places_on_support_or_ground",
+      "natural_language": "After lower_grasper, the grasper or held object is lowered onto the highest support below or ground.",
       "ast": {
         "type": "globally",
         "operand": {
           "type": "implies",
           "left": {
-            "type": "and",
-            "args": [
-              { "type": "ap", "name": "move_requested" },
-              { "type": "ap", "name": "holding" }
-            ]
+            "type": "ap",
+            "name": "last_action_is_lower_grasper"
           },
           "right": {
-            "type": "next",
-            "operand": { "type": "ap", "name": "held_object_xy_matches_grasper_xy" }
+            "type": "ap",
+            "name": "post_lowered_onto_highest_support_or_ground"
           }
         }
-      },
-      "notes": [
-        "The held object's z is preserved as grasper.position - Point(0, 0, height_offset), keeping the same vertical distance to the grasper."
-      ]
+      }
     }
   ],
-  "translation_assessment": {
-    "clean_ast_fits": [
-      "All state-toggle preconditions (lower/raise/close/open require correct current state)",
-      "Argument type checks (numeric x/y, integer obj_id)",
-      "Single-step effect rules (lower sets lowered, raise clears lowered, close sets closed)",
-      "Raise clears resting_on for grasper and held object"
+  "design_assessment": {
+    "benefits": [
+      "Primitive actions now match the simulator exactly.",
+      "APs are static facts about one transition snapshot.",
+      "Rules are easy to combine into higher-level specifications."
     ],
-    "abstracted_ast_fits": [
-      "Support checks for dropping (target_can_support_held encodes the box-specific footprint rule)",
-      "Move bounds checks (per-axis, conditioned on argument presence)",
-      "Carry effects during move (held_object_xy_matches_grasper_xy)",
-      "Raise clears scene (grasper_clears_scene)",
-      "Lower rests on highest object below (grasper_lowered_onto_highest_below_or_ground)",
-      "Centering tolerance for resting_on tag assignment (grasper_centered_over_object)"
+    "remaining_abstractions": [
+      "Support geometry is represented by derived APs such as pre_support_can_hold_object.",
+      "Scene-clearance and exact lowering target remain abstract APs computed by the verifier."
     ],
-    "known_omissions": [
-      "Frame conditions: rules do not state which fluents are unchanged by each action. A closed-world assumption is required.",
-      "Exact numeric geometry (grasper position z-values, bounding box arithmetic) is encoded in abstract APs rather than arithmetic LTL.",
-      "The default_grasper selection logic (first grasper found in scene if none set) is not encoded."
-    ],
-    "recommended_usage": [
-      "Bind each AP from real or predicted simulator state at each step.",
-      "Evaluate geometry-heavy APs (grasper_centered_over_object, grasper_clears_scene, target_can_support_held) via Python-computed predicates rather than symbolic expansion.",
-      "Apply frame axioms externally: assume each unmentioned fluent is unchanged unless an effect rule explicitly sets it.",
-      "Distinguish env-layer rules (mandatory for agent-facing API) from ctrl-layer rules (apply when calling Controller directly)."
+    "recommended_next_step": [
+      "Build a Python state-to-AP extractor for these names.",
+      "Then evaluate the AST formulas over predicted or real transition snapshots."
     ]
   }
 }

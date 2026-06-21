@@ -1,5 +1,6 @@
 """Ollama-backed natural-language agent for the SHRDLU blocks world."""
 
+import copy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from urllib import error, request
 from typing import Dict, List, Optional
 
 from shrdlu_blocks.env import ShrdluBlocksEnv
+from shrdlu_blocks.property_verifier import PROPERTY_FILE, TransitionPropertyVerifier
 
 try:
     from openai import OpenAI
@@ -130,6 +132,7 @@ class OllamaShrdluAgent:
         self._host = host.rstrip('/')
         self._max_steps = max_steps
         self._trace_dir = Path(trace_dir) if trace_dir else None
+        self._property_verifier = TransitionPropertyVerifier.from_file()
 
     @property
     def env(self) -> ShrdluBlocksEnv:
@@ -157,6 +160,7 @@ class OllamaShrdluAgent:
             'host': self._host,
             'max_steps': self._max_steps,
             'request': request,
+            'property_monitoring': self._property_monitoring_metadata(),
             'steps': [],
         }
         history: List[Dict[str, str]] = [{
@@ -166,6 +170,7 @@ class OllamaShrdluAgent:
         action_help = self._env.action_help()
         observation = self._env.snapshot_text()
         last_result = 'No simulator command has been executed yet.'
+        previous_property_status = None
 
         for step_index in range(self._max_steps):
             prompt = self._build_user_prompt(request, action_help, observation, last_result)
@@ -207,16 +212,28 @@ class OllamaShrdluAgent:
                 self._write_trace(trace)
                 return self._format_reply(response_text, None)
 
+            pre_state = self._env.snapshot()
+            pre_scene = copy.deepcopy(self._env.scene)
             try:
                 result = self._env.execute_action(action)
             except Exception as exc:
                 result = "ERROR: %s" % exc
+            post_state = self._env.snapshot()
+            property_trace, previous_property_status = self._monitor_transition_properties(
+                pre_state,
+                action,
+                post_state,
+                pre_scene=pre_scene,
+                post_scene=self._env.scene,
+                previous_property_status=previous_property_status,
+            )
             executed_action = self._format_action(action)
             observation = self._env.snapshot_text()
             last_result = "Executed %s.\nResult: %s" % (executed_action, result)
             step_trace.update({
                 'executed_action': action,
                 'action_result': result,
+                'property_verification': property_trace,
                 'observation_after': observation,
             })
             trace['steps'].append(step_trace)
@@ -386,13 +403,32 @@ class OllamaShrdluAgent:
                     return value
         return {}
 
-    def _write_trace(self, trace: Dict[str, object]) -> Optional[str]:
+    def _start_trace_session(self, trace: Dict[str, object]) -> Optional[str]:
         if self._trace_dir is None:
             return None
         self._trace_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         trace_path = self._trace_dir / ('trace_%s.json' % timestamp)
+        trace['_live'] = True
         trace_path.write_text(json.dumps(trace, indent=2), encoding='utf-8')
+        return str(trace_path)
+
+    def _checkpoint_trace(self, trace: Dict[str, object], trace_path: Optional[str]) -> Optional[str]:
+        if not trace_path:
+            return trace_path
+        trace['_live'] = True
+        Path(trace_path).write_text(json.dumps(trace, indent=2), encoding='utf-8')
+        return trace_path
+
+    def _write_trace(self, trace: Dict[str, object], trace_path: Optional[str] = None) -> Optional[str]:
+        if self._trace_dir is None and not trace_path:
+            return None
+        if trace_path is None:
+            trace_path = self._start_trace_session(trace)
+        if not trace_path:
+            return None
+        trace.pop('_live', None)
+        Path(trace_path).write_text(json.dumps(trace, indent=2), encoding='utf-8')
         return str(trace_path)
 
     @staticmethod
@@ -400,6 +436,49 @@ class OllamaShrdluAgent:
         if not trace_path:
             return message
         return message + "\n\nTrace saved to %s" % trace_path
+
+    def _property_monitoring_metadata(self) -> Dict[str, object]:
+        return {
+            'enabled': True,
+            'property_file': str(PROPERTY_FILE),
+            'property_count': len(self._property_verifier.properties),
+        }
+
+    def _monitor_transition_properties(
+        self,
+        pre_state: Dict[str, object],
+        action: Dict[str, object],
+        post_state: Dict[str, object],
+        *,
+        pre_scene,
+        post_scene,
+        previous_property_status: Optional[Dict[str, bool]],
+    ):
+        verification = self._property_verifier.verify_transition(
+            pre_state,
+            action,
+            post_state,
+            pre_scene=pre_scene,
+            post_scene=post_scene,
+        )
+        current_property_status = {
+            item['id']: bool(item['satisfied'])
+            for item in verification['property_results']
+            if item.get('id')
+        }
+        changed_properties = []
+        if previous_property_status is not None:
+            for property_id, current_value in current_property_status.items():
+                previous_value = previous_property_status.get(property_id)
+                if previous_value is None or previous_value == current_value:
+                    continue
+                changed_properties.append({
+                    'id': property_id,
+                    'before': previous_value,
+                    'after': current_value,
+                })
+        verification['changed_properties'] = changed_properties
+        return verification, current_property_status
 
     def _chat(self, messages: List[Dict[str, str]], schema: Dict[str, object] = DECISION_SCHEMA) -> str:
         payload = json.dumps({
@@ -438,6 +517,8 @@ class OpenAICompatibleShrdluAgent(OllamaShrdluAgent):
                  trace_dir: Optional[str] = DEFAULT_TRACE_DIR,
                  temperature: float = 0.2,
                  max_tokens: int = 512,
+                 enable_thinking: bool = True,
+                 separate_reasoning: bool = True,
                  client=None):
         super().__init__(
             env,
@@ -455,6 +536,8 @@ class OpenAICompatibleShrdluAgent(OllamaShrdluAgent):
         self._client = client
         self._temperature = float(temperature)
         self._max_tokens = int(max_tokens)
+        self._enable_thinking = bool(enable_thinking)
+        self._separate_reasoning = bool(separate_reasoning)
 
     def _chat(self, messages: List[Dict[str, str]], schema: Dict[str, object] = DECISION_SCHEMA) -> str:
         del schema
@@ -464,6 +547,10 @@ class OpenAICompatibleShrdluAgent(OllamaShrdluAgent):
                 messages=messages,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
+                extra_body={
+                    'chat_template_kwargs': {'enable_thinking': self._enable_thinking},
+                    'separate_reasoning': self._separate_reasoning,
+                },
             )
         except Exception as exc:
             raise RuntimeError(
@@ -486,6 +573,7 @@ class _PreplannedShrdluAgentMixin:
             'max_steps': self._max_steps,
             'request': request,
             'planning_mode': 'preplanned',
+            'property_monitoring': self._property_monitoring_metadata(),
             'steps': [],
         }
         action_help = self._env.action_help()
@@ -551,18 +639,31 @@ class _PreplannedShrdluAgentMixin:
             )
 
         last_result = None
+        previous_property_status = None
         for step_index, action in enumerate(plan):
             step_trace = {
                 'step_index': step_index,
                 'planned_action': action,
             }
+            pre_state = self._env.snapshot()
+            pre_scene = copy.deepcopy(self._env.scene)
             try:
                 result = self._env.execute_action(action)
             except Exception as exc:
                 result = "ERROR: %s" % exc
+            post_state = self._env.snapshot()
+            property_trace, previous_property_status = self._monitor_transition_properties(
+                pre_state,
+                action,
+                post_state,
+                pre_scene=pre_scene,
+                post_scene=self._env.scene,
+                previous_property_status=previous_property_status,
+            )
             observation = self._env.snapshot_text()
             step_trace.update({
                 'action_result': result,
+                'property_verification': property_trace,
                 'observation_after': observation,
             })
             trace['steps'].append(step_trace)

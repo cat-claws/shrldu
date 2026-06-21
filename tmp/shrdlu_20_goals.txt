@@ -1,0 +1,20 @@
+put the red small block on the green medium block
+put the green pyramid on the green medium block
+put the blue pyramid on the red big block
+put the blue pyramid on the green medium block
+put the red pyramid on the red big block
+put the red pyramid in the white box
+put the blue block on the green big block
+put the blue block in the white box
+put the green medium block on the green big block
+put the red small block in the white box
+put the green pyramid in the white box
+put the red small block on the blue block
+put the blue pyramid on the blue block
+highlight the blue pyramid
+highlight the green pyramid
+unhighlight the blue pyramid
+put the red pyramid on the green pyramid
+stack two pyramids
+put the green pyramid on the blue pyramid
+put the blue block on the red pyramid

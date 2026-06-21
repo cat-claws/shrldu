@@ -1,0 +1,83 @@
+{
+  "metadata": {
+    "purpose": "Primitive atomic propositions for SHRDLU verification",
+    "design_rule": [
+      "Only keep primitive unit facts.",
+      "Use names that follow the simulator code and tag fields closely.",
+      "Do not include syntax-level argument checks or id/existence validation checks.",
+      "Do not include combined or derived properties."
+    ],
+    "source_files": [
+      "shrdlu_blocks/control.py",
+      "shrdlu_blocks/env.py"
+    ]
+  },
+  "last_action_aps": [
+    {
+      "name": "last_action_move_grasper",
+      "description": "The last executed primitive action was move_grasper."
+    },
+    {
+      "name": "last_action_lower_grasper",
+      "description": "The last executed primitive action was lower_grasper."
+    },
+    {
+      "name": "last_action_raise_grasper",
+      "description": "The last executed primitive action was raise_grasper."
+    },
+    {
+      "name": "last_action_close_grasper",
+      "description": "The last executed primitive action was close_grasper."
+    },
+    {
+      "name": "last_action_open_grasper",
+      "description": "The last executed primitive action was open_grasper."
+    },
+    {
+      "name": "last_action_highlight_object",
+      "description": "The last executed primitive action was highlight_object."
+    },
+    {
+      "name": "last_action_unhighlight_object",
+      "description": "The last executed primitive action was unhighlight_object."
+    }
+  ],
+  "current_state_aps": [
+    {
+      "name": "grasper_tag_lowered",
+      "description": "The active grasper has tags['lowered'] == True."
+    },
+    {
+      "name": "grasper_tag_closed",
+      "description": "The active grasper has tags['closed'] == True."
+    },
+    {
+      "name": "grasper_tag_grasped_nonnull",
+      "description": "The active grasper has tags['grasped'] != None."
+    },
+    {
+      "name": "grasper_tag_resting_on_nonnull",
+      "description": "The active grasper has tags['resting_on'] != None."
+    },
+    {
+      "name": "object_tag_resting_on_nonnull",
+      "description": "An object has tags['resting_on'] != None."
+    },
+    {
+      "name": "object_tag_grasped_by_nonnull",
+      "description": "An object has tags['grasped_by'] != None."
+    },
+    {
+      "name": "object_tag_graspable",
+      "description": "An object has tags['graspable'] == True."
+    },
+    {
+      "name": "object_tag_can_support",
+      "description": "An object has tags['can_support'] == True."
+    },
+    {
+      "name": "object_tag_highlight",
+      "description": "An object has tags['highlight'] == True."
+    }
+  ]
+}

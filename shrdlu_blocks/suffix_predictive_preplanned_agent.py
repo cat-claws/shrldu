@@ -4,6 +4,7 @@ import copy
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from shrdlu_blocks.agent import (
@@ -21,6 +22,11 @@ from shrdlu_blocks.env import ShrdluBlocksEnv
 from shrdlu_blocks.predictive_preplanned_agent import (
     _PredictivePreplannedShrdluAgentMixin,
 )
+from shrdlu_blocks.property_verifier import TransitionPropertyVerifier
+from shrdlu_blocks.tla_verifier import verify_ap_trace
+
+_AP_CANDIDATES: List[Dict[str, str]] = TransitionPropertyVerifier.from_file().aps
+_AP_NAMES: List[str] = [ap['name'] for ap in _AP_CANDIDATES]
 
 __all__ = [
     'SuffixPredictivePreplannedOllamaShrdluAgent',
@@ -31,32 +37,18 @@ __all__ = [
 SUFFIX_PREDICTIVE_PLAN_SYSTEM_PROMPT = """You are planning a SHRDLU blocks-world task before execution.
 
 Rules:
-- Read the current predicted scene carefully before planning.
-- Read the object descriptions and candidate object ids before scanning the larger object lists.
-- Think through the full remaining task first, then return the complete remaining action suffix up front.
-- Treat each suffix attempt as self-contained and do not assume you will get to repair it later.
+- Think through the full remaining task first, then return the complete remaining action suffix.
+- Treat each suffix attempt as self-contained; do not assume you will get to repair it later.
 - Treat the plan as a dry-run sequence of primitive simulator calls that will be verified before execution.
 - Use only the allowed primitive action names and the matching JSON args listed in the allowed actions schema.
-- Never invent argument names that are not listed in the allowed action schema.
-- Never use null, placeholders, or descriptive strings where a concrete numeric or integer argument is required.
-- Ground every action argument from the structured planning state summary or current predicted state JSON.
-- Base the suffix plan only on the goal, the current predicted state, the accepted action trace so far, and any failed suffix feedback shown to you.
-- Prefer the shortest valid remaining plan.
-- Do not include undo steps unless the current predicted state makes them necessary for the goal.
-- Avoid repeated alternating patterns or repeated identical actions unless they are strictly required by a new state change.
-- Resolve object references by the full description, not by one attribute alone. For example, "green box" must match both color=green and kind=box; do not substitute a green block or a white box.
-- Never combine attributes across stacked or co-located objects. A phrase like "green small block" must match one object id with color=green, kind=block, and size=small.
-- Match every user-mentioned attribute that exists in the scene representation, including kind, color, size, height, width, and supportability when relevant.
-- Bind all user-mentioned attributes to one single object. For example, "green small block" means one object with color=green, kind=block, and size=small; it does not mean a green object on top of a small block.
-- If the request is ambiguous or the described objects do not support a confident binding to one destination object id, do not substitute a merged or invented object description. Return an empty plan and explain briefly.
-- For pick/place or stacking goals, identify one concrete source object from source_candidates and one concrete destination object from destination_candidates before planning the suffix.
-- For pick/place or stacking goals, use only a destination object with can_support=true. Never plan to place an object onto a pyramid or any object that cannot support it.
-- Ground move_grasper(x, y) by copying the coordinates of the chosen source or destination object from the object catalog.
-- Before planning open_grasper while holding an object, ensure the immediately previous lowered state would leave the held object resting_on the chosen destination object in the predicted world state.
-- If the held object would not yet be supported after lowering at the chosen destination coordinates, do not include open_grasper in the suffix.
-- If the grasper is currently holding an object (grasper_closed=true, grasped_object is set) and the goal requires picking a different object, first complete the full drop sequence for the held object: lower_grasper -> open_grasper -> raise_grasper, then begin the new pick.
-- Do not explain alternatives or reasoning.
-- Keep the response short and factual.
+- Never invent argument names not listed in the schema. Never use null or descriptive strings where a concrete numeric argument is required.
+- Ground every action argument from the initial world state, accepted action trace, or structured planning state summary.
+- The plan must be complete: include every action from the current state all the way to goal completion.
+- Resolve object references by every user-mentioned attribute simultaneously. "green small block" must match one object with color=green, kind=block, size=small — not a green object resting on a small block.
+- For pick/place goals, identify one concrete source from source_candidates and one concrete destination with can_support=true from destination_candidates before writing the suffix.
+- Ground move_grasper(x, y) by copying coordinates from the chosen object in the initial world state summary.
+- Plan; do not refuse.
+- Do not explain alternatives or reasoning. Keep the response short and factual.
 
 Return strict JSON only.
 """
@@ -67,11 +59,8 @@ Goal:
 
 {grounding_verdict}
 
-Current predicted property truth values (property_id: true/false):
-{current_property_bools_json}
-
-Current predicted world state JSON:
-{current_world_state_json}
+Current predicted AP truth values (ap_name: true/false):
+{current_ap_bools_json}
 
 Structured planning state summary:
 {planning_state_summary}
@@ -88,85 +77,122 @@ Allowed primitive actions:
 Failed suffix attempts and backtrack feedback:
 {failed_attempts_json}
 
-Use the manipulation skeleton only when it is valid: move_grasper(source) -> lower_grasper -> close_grasper -> raise_grasper -> move_grasper(destination) -> lower_grasper -> open_grasper.
-Do not use open_grasper as a default final step. Use it only when the chosen destination object can support the held object in the lowered predicted state.
-If grasper_closed=true and grasped_object is already set to a different object than your next pick target, insert a drop-and-raise sequence first: lower_grasper -> open_grasper -> raise_grasper.
+Banned first actions at this node (do NOT start your plan with any of these — they were already tried here):
+{banned_first_actions_json}
+
+Return the complete remaining action sequence from the current state to goal completion.
 JSON schema: {{"response": "...", "plan": [{{"name": "...", "args": {{...}}}}], "finish_response": "..."}}
 Return strict JSON only."""
 
 SUFFIX_PLAN_REPAIR_PROMPT_TEMPLATE = """\
 Your previous reply was invalid: {error}
 Rewrite it as strict JSON only using this schema:
-{{"response": "...", "plan": [{{"name": "...", "args": {{...}}}}], "finish_response": "..."}}"""
+{{"response": "...", "plan": [{{"name": "...", "args": {{...}}}}], "finish_response": "..."}}
+Return the complete remaining action sequence from the current state to goal completion."""
 
-PROPERTY_STATE_PREDICTION_SYSTEM_PROMPT = """You are predicting property-truth states in a SHRDLU blocks-world simulator.
+AP_STATE_PREDICTION_SYSTEM_PROMPT = """You are predicting atomic proposition (AP) truth values in a SHRDLU blocks-world simulator after one action.
 
-Rules:
-- Predict only the next state's property truth values after one action; do not explain the properties.
-- Predict conservatively from the simulator preconditions, not from the planner's intent.
-- When an action would fail a simulator precondition, keep the world state unchanged and mark any violated transition properties as unsatisfied in predicted_state.
-- Return ONLY property_results with property id and boolean satisfied. The satisfied field must be exactly true or false — no strings, no nulls, no other values.
-- Do NOT include natural_language, all_satisfied, violations, or any extra keys inside predicted_state.
-- Include every property id from the input exactly once and keep ids unchanged.
-- Also include predicted_world_state on every reply.
-- In predicted_world_state, include enough concrete state to check the next step: grasper_closed, grasper_lowered, grasped_object, and any changed objects with updated resting_on, grasped_by, can_support, tags, and position fields.
-- For open_grasper while holding an object, if the held object is not resting on a supporting object, predict the action as failing with no world-state change and mark the relevant open_* support properties unsatisfied.
-- Keep the response as short as possible.
+## Simulator action effects (exact rules)
+
+move_grasper(x, y):
+  Precondition: grasper_lowered == false.
+  Effect: grasper moves to (x, y). If an object is grasped, it moves with the grasper.
+  resting_on is unchanged (it only changes via lower_grasper / raise_grasper / open_grasper).
+
+lower_grasper:
+  Precondition: grasper_lowered == false.
+  Effect: grasper_lowered = true.
+  If NOT holding: grasper descends to the highest object directly below (x, y), or the table.
+    No object's resting_on changes.
+  If holding (grasped_object != null): held object descends to the highest object directly below (x, y).
+    held_object.resting_on = that support object (or null if table). No other resting_on changes.
+  If precondition fails: no state change.
+
+raise_grasper:
+  Precondition: grasper_lowered == true.
+  Effect: grasper_lowered = false.
+  If NOT holding: no object resting_on changes.
+  If holding: held_object.resting_on = null (object is now airborne).
+  If precondition fails: no state change.
+
+close_grasper:
+  Precondition: grasper_closed == false.
+  Effect: grasper_closed = true.
+  If lowered AND grasper.resting_on is a graspable object: grasped_object = that object id.
+  Otherwise: grasped_object stays null. No resting_on changes.
+  If precondition fails: no state change.
+
+open_grasper:
+  Precondition: grasper_closed == true.
+  If holding: further precondition: grasper_lowered == true AND held_object.resting_on != null AND support is valid.
+    On success: grasped_object = null, grasper_closed = false. held_object.resting_on stays as set by lower_grasper.
+    If further precondition fails: raises error, no state change.
+  If NOT holding: grasper_closed = false. No other change.
+
+## Constraints
+
+- Work from the initial world state + action history delta, not from the AP booleans alone.
+- resting_on changes only via: lower_grasper (when holding), raise_grasper (clears to null), open_grasper (held object released, resting_on stays).
+- grasper_lowered changes only via lower_grasper / raise_grasper.
+- grasper_closed changes only via close_grasper / open_grasper.
+- If an action fails its precondition: no state changes — copy all current AP values unchanged.
+- Every AP must appear in ap_results exactly once as a boolean (true or false). No strings, no nulls.
+
+## Output
+
+Fill the "reasoning" field in this order before writing ap_results:
+  1. grasped_object    — what object (if any) is currently held, from the action history delta.
+  2. precondition_check — does this action pass its precondition? If not, state no-change.
+  3. world_delta        — which fields change (grasper_lowered, grasper_closed, grasped_object, which resting_on)?
+  4. ap_derivation      — evaluate each AP formula against the resulting world state.
 
 Required JSON shape:
-{"response":"...", "predicted_state":{"property_results":[{"id":"prop.example","satisfied":true}]}, "predicted_world_state":{...}}
+{"reasoning": {"grasped_object": "...", "precondition_check": "...", "world_delta": "...", "ap_derivation": "..."}, "response": "...", "ap_results": {"<ap_name>": true, ...}}
 Return strict JSON only."""
 
-PROPERTY_STATE_PREDICTION_PROMPT_TEMPLATE = """\
-Current property truth values (property_id: true/false):
-{current_property_bools_json}
+AP_STATE_PREDICTION_PROMPT_TEMPLATE = """\
+Initial world state (authoritative — object positions, resting_on, grasped_object at t=0):
+{init_world_state_json}
 
-Current world state JSON:
-{current_world_state_json}
+Accepted actions so far (applied in order to the initial world state):
+{accepted_trace_json}
 
-Planned next action JSON:
+Accumulated world-state delta from accepted actions:
+{world_state_delta}
+
+Current AP truth values (derived from the predicted state after accepted actions):
+{current_ap_bools_json}
+
+Next action to predict:
 {action_json}
 
-Property catalog (id and condition for each property):
-{property_text}
+Atomic propositions (name: evaluation rule):
+{ap_catalog_text}
 
-Predict the next property-truth state after this one action.
-Each property must be predicted as exactly true or false — no other values.
-If the action would fail, preserve the current world state in predicted_world_state and reflect the failure in property truth values instead of imagining a successful effect.
 Return strict JSON only."""
 
-PROPERTY_STATE_SCHEMA = {
+AP_STATE_SCHEMA = {
     'type': 'object',
     'properties': {
+        'reasoning': {
+            'type': 'object',
+            'properties': {
+                'grasped_object': {'type': 'string'},
+                'precondition_check': {'type': 'string'},
+                'world_delta': {'type': 'string'},
+                'ap_derivation': {'type': 'string'},
+            },
+            'required': ['grasped_object', 'precondition_check', 'world_delta', 'ap_derivation'],
+        },
         'response': {
             'type': 'string',
         },
-        'predicted_state': {
+        'ap_results': {
             'type': 'object',
-            'properties': {
-                'property_results': {
-                    'type': 'array',
-                    'items': {
-                        'type': 'object',
-                        'properties': {
-                            'id': {
-                                'type': 'string',
-                            },
-                            'satisfied': {
-                                'type': 'boolean',
-                            },
-                        },
-                        'required': ['id', 'satisfied'],
-                    },
-                },
-            },
-            'required': ['property_results'],
-        },
-        'predicted_world_state': {
-            'type': 'object',
+            'additionalProperties': {'type': 'boolean'},
         },
     },
-    'required': ['response', 'predicted_state'],
+    'required': ['reasoning', 'response', 'ap_results'],
 }
 
 
@@ -175,11 +201,7 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
 
     def _run_agent_loop(self, request: str) -> str:
         initial_world_state = self._env.snapshot()
-        initial_scene = copy.deepcopy(self._env.scene)
-        initial_state = self._build_initial_property_state(
-            initial_world_state,
-            scene=initial_scene,
-        )
+        initial_state = self._build_initial_ap_state(initial_world_state)
         trace = {
             'timestamp_utc': datetime.now(timezone.utc).isoformat(),
             'model': self._model,
@@ -207,7 +229,7 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             'steps': [],
         }
         action_help = self._env.action_help()
-        trace['planning_tree']['initial_state'] = initial_state
+        trace['planning_tree']['initial_ap_state'] = initial_state
         trace['planning_tree']['initial_world_state'] = initial_world_state
         trace['planning_tree']['action_help'] = action_help
         trace['status'] = 'planning'
@@ -216,13 +238,15 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
         result = self._search_plan_suffix(
             request=request,
             current_state=initial_state,
-            current_world_state=initial_world_state,
+            init_world_state=initial_world_state,
+            preceding_ap_trace=[initial_state],
             accepted_trace=[],
             depth=0,
             planning_tree=trace['planning_tree'],
             action_help=action_help,
             parent_node_id=None,
             inherited_failures=[],
+            hint_plan=None,
             trace=trace,
             trace_path=trace_path,
         )
@@ -235,13 +259,22 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             trace['planning_tree']['failure'] = result['failure']
 
         if not result.get('success'):
-            final_message = self._normalize_response_text(
+            base_message = self._normalize_response_text(
                 result.get('finish_response', 'No feasible property-satisfying plan found.'),
                 is_finish=True,
             )
+            violated = self._collect_violated_properties(result.get('failure'))
+            if violated:
+                violated_text = 'Properties violated: ' + ', '.join(sorted(violated))
+                final_message = base_message + '\n' + violated_text
+            else:
+                final_message = base_message
             trace['status'] = 'infeasible'
             trace['final_message'] = final_message
+            trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
             trace_path = self._write_trace(trace, trace_path)
+            if trace_path:
+                self._save_tree_svg(trace['planning_tree'], trace_path)
             return self._append_trace_notice(final_message, trace_path)
 
         plan = result['plan']
@@ -257,13 +290,16 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
         if not plan:
             trace['status'] = 'finished'
             trace['final_message'] = finish_response
-            self._write_trace(trace, trace_path)
+            trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
+            trace_path = self._write_trace(trace, trace_path)
+            if trace_path:
+                self._save_tree_svg(trace['planning_tree'], trace_path)
             return finish_response if response_text == finish_response else self._format_reply(
                 response_text,
                 finish_response,
             )
 
-        previous_property_status = None
+        executed_ap_trace = [initial_state]
         trace['status'] = 'executing'
         self._checkpoint_trace(trace, trace_path)
         for step_index, action in enumerate(plan):
@@ -271,24 +307,19 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                 'step_index': step_index,
                 'planned_action': action,
             }
-            pre_state = self._env.snapshot()
-            pre_scene = copy.deepcopy(self._env.scene)
             try:
                 result_text = self._env.execute_action(action)
             except Exception as exc:
                 result_text = "ERROR: %s" % exc
             post_state = self._env.snapshot()
-            property_trace, previous_property_status = self._monitor_transition_properties(
-                pre_state,
-                action,
-                post_state,
-                pre_scene=pre_scene,
-                post_scene=self._env.scene,
-                previous_property_status=previous_property_status,
-            )
+            ap_state = self._build_initial_ap_state(post_state)
+            executed_ap_trace.append(ap_state)
+            tla_result = verify_ap_trace(executed_ap_trace, _AP_NAMES)
             step_trace.update({
                 'action_result': result_text,
-                'property_verification': property_trace,
+                'ap_state': ap_state,
+                'ap_changes': self._diff_ap_states(executed_ap_trace[-2], ap_state),
+                'tla_verification': tla_result,
                 'observation_after': self._env.snapshot_text(),
             })
             trace['steps'].append(step_trace)
@@ -300,15 +331,26 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                 )
                 trace['status'] = 'error'
                 trace['final_message'] = final_message
+                trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
                 trace_path = self._write_trace(trace, trace_path)
+                if trace_path:
+                    self._save_tree_svg(trace['planning_tree'], trace_path)
                 return self._append_trace_notice(final_message, trace_path)
+
+        # Post-execution grasper cleanup: if the grasper is not already raised and
+        # open, bring it to a clean state. The LLM is not asked to plan this — we
+        # simply inspect the live world state and run the minimum sequence.
+        self._execute_grasper_cleanup(trace)
 
         final_message = finish_response
         if response_text != finish_response:
             final_message = self._format_reply(response_text, finish_response)
         trace['status'] = 'finished'
         trace['final_message'] = final_message
-        self._write_trace(trace, trace_path)
+        trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
+        trace_path = self._write_trace(trace, trace_path)
+        if trace_path:
+            self._save_tree_svg(trace['planning_tree'], trace_path)
         return final_message
 
     def _search_plan_suffix(
@@ -316,23 +358,47 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
         *,
         request: str,
         current_state: Dict[str, object],
-        current_world_state: Dict[str, object],
+        init_world_state: Dict[str, object],
+        preceding_ap_trace: List[Dict[str, bool]],
         accepted_trace: List[Dict[str, object]],
         depth: int,
         planning_tree: Dict[str, object],
         action_help: str,
         parent_node_id: Optional[int],
         inherited_failures: List[Dict[str, object]],
+        hint_plan: Optional[List[Dict[str, object]]],
         trace: Dict[str, object],
         trace_path: Optional[str],
     ) -> Dict[str, object]:
-        if depth >= self._max_steps:
+        """Search for a feasible plan suffix from the current state.
+
+        Each call corresponds to exactly one node in the planning tree, which
+        represents the choice of *one action* at the current state.  The node
+        may try up to ``max_branch_retries`` different actions (children).  For
+        each candidate action the node:
+
+          1. Reuses ``hint_plan`` from the parent's verified suffix tail when
+             available; otherwise asks the LLM for a full suffix from this state.
+          2. Verifies only the *first* action of that suffix via AP prediction
+             + TLC.
+          3. If the first action passes, recurses into a child node passing the
+             remaining suffix as ``hint_plan``.
+          4. If the child subtree dies the node tries a new action (next child
+             slot) — true backtracking.
+          5. If all ``max_branch_retries`` actions fail the node is dead and
+             propagates failure to its parent.
+
+        This ensures one node per action in the tree, so backtracking walks
+        back exactly one action at a time.
+        """
+        if len(planning_tree['nodes']) >= self._max_steps:
             return {
                 'success': False,
                 'failure': {
-                    'type': 'max_depth',
+                    'type': 'max_tries',
                     'depth': depth,
-                    'message': 'Planning exceeded the max step budget before reaching finish.',
+                    'nodes_created': len(planning_tree['nodes']),
+                    'message': 'Planning exceeded the max node budget of %d.' % self._max_steps,
                 },
                 'finish_response': 'No feasible property-satisfying plan found.',
             }
@@ -342,47 +408,68 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             'node_id': node_id,
             'parent_node_id': parent_node_id,
             'depth': depth,
-            'accepted_trace': copy.deepcopy(accepted_trace),
-            'current_state': copy.deepcopy(current_state),
-            'current_world_state': copy.deepcopy(current_world_state),
+            'accepted_steps': self._zip_accepted_steps(accepted_trace, preceding_ap_trace),
+            'current_ap_state': copy.deepcopy(current_state),
             'attempts': [],
             'children': [],
             'result': 'searching',
         }
         planning_tree['nodes'].append(node)
         self._checkpoint_trace(trace, trace_path)
-        failed_attempts = list(inherited_failures)
 
-        for retry_index in range(self._max_branch_retries):
-            plan_prompt = self._build_suffix_plan_prompt(
-                request=request,
-                action_help=action_help,
-                current_state=current_state,
-                current_world_state=current_world_state,
-                accepted_trace=accepted_trace,
-                failed_attempts=failed_attempts,
-            )
-            history = [
-                {'role': 'system', 'content': SUFFIX_PREDICTIVE_PLAN_SYSTEM_PROMPT},
-                {'role': 'user', 'content': plan_prompt},
-            ]
-            try:
-                content, plan_bundle, attempts = self._request_suffix_plan(history)
-            except Exception as exc:
-                failure = {
-                    'type': 'planning_error',
-                    'depth': depth,
-                    'retry_index': retry_index,
-                    'message': str(exc),
+        failed_attempts = list(inherited_failures)
+        # Track first actions already tried at this node to avoid same-sibling repeats.
+        banned_first_actions: List[Dict[str, object]] = []
+        # The hint from the parent; reused for the first child attempt only.
+        current_hint = list(hint_plan) if hint_plan else []
+
+        for child_index in range(self._max_branch_retries):
+            if current_hint:
+                plan_prompt = None
+                content = ''
+                plan_bundle = {
+                    'response': 'Reusing previously planned suffix tail.',
+                    'plan': copy.deepcopy(current_hint),
+                    'finish_response': 'Done.',
                 }
-                node['attempts'].append({
-                    'retry_index': retry_index,
-                    'planner_prompt': plan_prompt,
-                    'error': str(exc),
-                })
-                self._checkpoint_trace(trace, trace_path)
-                failed_attempts.append(failure)
-                continue
+                attempts = [{
+                    'attempt_index': 0,
+                    'reuse_hint_plan': True,
+                    'hint_plan_length': len(current_hint),
+                }]
+                current_hint = []
+            else:
+                plan_prompt = self._build_suffix_plan_prompt(
+                    request=request,
+                    action_help=action_help,
+                    current_state=current_state,
+                    init_world_state=init_world_state,
+                    accepted_trace=accepted_trace,
+                    failed_attempts=failed_attempts,
+                    banned_first_actions=banned_first_actions,
+                )
+                history = [
+                    {'role': 'system', 'content': SUFFIX_PREDICTIVE_PLAN_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': plan_prompt},
+                ]
+                try:
+                    content, plan_bundle, attempts = self._request_suffix_plan(history)
+                except Exception as exc:
+                    failure = {
+                        'type': 'planning_error',
+                        'depth': depth,
+                        'child_index': child_index,
+                        'message': str(exc),
+                    }
+                    node['attempts'].append({
+                        'child_index': child_index,
+                        'planner_prompt': plan_prompt,
+                        'error': str(exc),
+                    })
+                    self._checkpoint_trace(trace, trace_path)
+                    failed_attempts.append(failure)
+                    current_hint = []
+                    continue
 
             response_text = self._normalize_response_text(
                 plan_bundle.get('response', ''),
@@ -393,13 +480,16 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                 is_finish=True,
             )
             attempt_trace = {
-                'retry_index': retry_index,
+                'child_index': child_index,
                 'planner_prompt': plan_prompt,
                 'planner_attempts': attempts,
                 'planner_response': content,
                 'planner_decision': plan_bundle,
             }
+            if plan_prompt is None:
+                attempt_trace['plan_source'] = 'hint_plan'
 
+            # Empty plan — LLM says goal already satisfied at this state.
             if not plan_bundle['plan']:
                 attempt_trace['accepted'] = True
                 attempt_trace['finish'] = True
@@ -415,192 +505,193 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                     'node_id': node_id,
                 }
 
-            if depth + len(plan_bundle['plan']) > self._max_steps:
-                failure = {
-                    'type': 'plan_too_long',
-                    'depth': depth,
-                    'retry_index': retry_index,
-                    'planned_length': len(plan_bundle['plan']),
-                    'remaining_budget': self._max_steps - depth,
-                    'message': 'Planned suffix exceeds the remaining step budget.',
-                }
+            # Take only the first action from the suffix for this node.
+            action = plan_bundle['plan'][0]
+            tail = plan_bundle['plan'][1:]
+
+            # Verify this single action via AP prediction + TLC.
+            step_verification = self._verify_single_step(
+                action=action,
+                current_state=current_state,
+                init_world_state=init_world_state,
+                preceding_ap_trace=preceding_ap_trace,
+                accepted_trace=accepted_trace,
+                is_last_step=(not tail),
+            )
+            attempt_trace['action'] = action
+            attempt_trace['step_verification'] = step_verification
+
+            if not step_verification['passed']:
+                failure = step_verification['failure']
                 attempt_trace['accepted'] = False
                 attempt_trace['failure_feedback'] = failure
                 node['attempts'].append(attempt_trace)
                 self._checkpoint_trace(trace, trace_path)
                 failed_attempts.append(failure)
+                banned_first_actions.append(action)
+                current_hint = []
                 continue
 
-            rollout = self._verify_planned_suffix(
-                plan=plan_bundle['plan'],
-                current_state=current_state,
-                current_world_state=current_world_state,
-            )
-            attempt_trace.update({
-                'predicted_rollout': rollout.get('steps', []),
-            })
+            # This action passes — recurse into the child node for the next step.
+            predicted_ap_state = step_verification['predicted_ap_state']
+            new_preceding_ap_trace = preceding_ap_trace + [predicted_ap_state]
 
-            if rollout.get('success'):
+            if not tail:
                 attempt_trace['accepted'] = True
                 node['attempts'].append(attempt_trace)
                 node['result'] = 'accepted'
-                node['accepted_suffix_plan'] = plan_bundle['plan']
-                node['accepted_predicted_state'] = rollout.get('final_state')
-                node['accepted_predicted_world_state'] = rollout.get('final_world_state')
+                node['accepted_action'] = action
+                node['accepted_predicted_ap_state'] = predicted_ap_state
+                node['finish_response'] = finish_response
                 self._checkpoint_trace(trace, trace_path)
                 return {
                     'success': True,
-                    'plan': plan_bundle['plan'],
+                    'plan': [action],
                     'planning_response': response_text,
                     'finish_response': finish_response,
                     'node_id': node_id,
                 }
-            failure = rollout['failure']
-            attempt_trace['accepted'] = False
-            attempt_trace['failure_feedback'] = failure
 
-            replan_prefix = rollout.get('verified_prefix', [])
-            replan_state = rollout.get('last_valid_state') if replan_prefix else None
-            replan_world_state = rollout.get('last_valid_world_state') if replan_prefix else None
-
-            if replan_prefix and replan_state is not None and replan_world_state is not None:
-                child_result = self._search_plan_suffix(
-                    request=request,
-                    current_state=replan_state,
-                    current_world_state=replan_world_state,
-                    accepted_trace=accepted_trace + replan_prefix,
-                    depth=depth + len(replan_prefix),
-                    planning_tree=planning_tree,
-                    action_help=action_help,
-                    parent_node_id=node_id,
-                    inherited_failures=[failure],
-                    trace=trace,
-                    trace_path=trace_path,
-                )
-                attempt_trace['child_node_id'] = child_result.get('node_id')
-                if child_result.get('node_id') is not None:
-                    node['children'].append(child_result['node_id'])
-                if child_result.get('success'):
-                    node['attempts'].append(attempt_trace)
-                    node['result'] = 'accepted_with_replan'
-                    node['accepted_prefix'] = replan_prefix
-                    self._checkpoint_trace(trace, trace_path)
-                    return {
-                        'success': True,
-                        'plan': replan_prefix + child_result.get('plan', []),
-                        'planning_response': child_result.get('planning_response', response_text),
-                        'finish_response': child_result.get('finish_response', finish_response),
-                        'node_id': node_id,
-                    }
-                attempt_trace['child_failure'] = child_result.get('failure')
-
+            child_result = self._search_plan_suffix(
+                request=request,
+                current_state=predicted_ap_state,
+                init_world_state=init_world_state,
+                preceding_ap_trace=new_preceding_ap_trace,
+                accepted_trace=accepted_trace + [action],
+                depth=depth + 1,
+                planning_tree=planning_tree,
+                action_help=action_help,
+                parent_node_id=node_id,
+                inherited_failures=[],
+                hint_plan=tail,
+                trace=trace,
+                trace_path=trace_path,
+            )
+            attempt_trace['child_node_id'] = child_result.get('node_id')
+            if child_result.get('node_id') is not None:
+                node['children'].append(child_result['node_id'])
             node['attempts'].append(attempt_trace)
             self._checkpoint_trace(trace, trace_path)
-            failed_attempts.append(failure)
+
+            if child_result.get('success'):
+                attempt_trace['accepted'] = True
+                node['result'] = 'accepted'
+                node['accepted_action'] = action
+                node['accepted_predicted_ap_state'] = predicted_ap_state
+                return {
+                    'success': True,
+                    'plan': [action] + child_result.get('plan', []),
+                    'planning_response': response_text,
+                    'finish_response': child_result.get('finish_response', finish_response),
+                    'node_id': node_id,
+                }
+
+            # Child subtree dead — backtrack: ban this first action and try a new one.
+            attempt_trace['accepted'] = False
+            attempt_trace['child_failure'] = child_result.get('failure')
+            failed_attempts.append(child_result.get('failure', {
+                'type': 'child_failure',
+                'depth': depth + 1,
+                'message': 'Child subtree exhausted.',
+            }))
+            banned_first_actions.append(action)
+            current_hint = []
 
         node['result'] = 'backtracked'
-        failure = {
+        exhaustion_failure = {
             'type': 'branch_exhausted',
             'depth': depth,
             'node_id': node_id,
             'failed_attempts': failed_attempts,
-            'message': 'All suffix replanning retries at this predicted state were exhausted.',
+            'message': 'All %d action attempts at this node were exhausted.' % self._max_branch_retries,
         }
-        node['failure'] = failure
+        node['failure'] = exhaustion_failure
         self._checkpoint_trace(trace, trace_path)
         return {
             'success': False,
-            'failure': failure,
+            'failure': exhaustion_failure,
             'finish_response': 'No feasible property-satisfying plan found.',
             'node_id': node_id,
         }
 
-    def _verify_planned_suffix(
+    def _verify_single_step(
         self,
         *,
-        plan: List[Dict[str, object]],
+        action: Dict[str, object],
         current_state: Dict[str, object],
-        current_world_state: Dict[str, object],
+        init_world_state: Dict[str, object],
+        preceding_ap_trace: List[Dict[str, bool]],
+        accepted_trace: List[Dict[str, object]],
+        is_last_step: bool,
     ) -> Dict[str, object]:
-        state = copy.deepcopy(current_state)
-        world_state = copy.deepcopy(current_world_state)
-        verified_prefix = []
-        rollout_steps = []
+        """Verify one action via AP state prediction + TLC.
 
-        for suffix_index, action in enumerate(plan):
-            prediction_prompt = self._build_property_state_prediction_prompt(
-                current_state=state,
-                current_world_state=world_state,
-                action=action,
+        Returns a dict with:
+          passed              — bool
+          predicted_ap_state  — the AP state after the action (if passed)
+          failure             — failure dict (if not passed)
+          prediction_detail   — raw prediction info for trace logging
+        """
+        prediction_prompt = self._build_ap_state_prediction_prompt(
+            current_ap_state=current_state,
+            action=action,
+            init_world_state=init_world_state,
+            accepted_trace=accepted_trace,
+        )
+        history = [
+            {'role': 'system', 'content': AP_STATE_PREDICTION_SYSTEM_PROMPT},
+            {'role': 'user', 'content': prediction_prompt},
+        ]
+        try:
+            prediction_response, prediction_bundle, prediction_attempts = self._request_ap_state_prediction(
+                history,
+                current_state,
             )
-            history = [
-                {'role': 'system', 'content': PROPERTY_STATE_PREDICTION_SYSTEM_PROMPT},
-                {'role': 'user', 'content': prediction_prompt},
-            ]
-            try:
-                prediction_response, prediction_bundle, prediction_attempts = self._request_property_state_prediction(
-                    history,
-                    state,
-                    world_state,
-                )
-            except Exception as exc:
-                return {
-                    'success': False,
-                    'verified_prefix': verified_prefix,
-                    'last_valid_state': state,
-                    'last_valid_world_state': world_state,
-                    'steps': rollout_steps,
-                    'failure': {
-                        'type': 'prediction_error',
-                        'suffix_index': suffix_index,
-                        'action': action,
-                        'message': str(exc),
-                    },
-                }
+        except Exception as exc:
+            return {
+                'passed': False,
+                'predicted_ap_state': None,
+                'failure': {
+                    'type': 'prediction_error',
+                    'action': action,
+                    'message': str(exc),
+                },
+                'prediction_detail': {'error': str(exc)},
+            }
 
-            predicted_state = prediction_bundle['predicted_state']
-            predicted_world_state = prediction_bundle.get('predicted_world_state', world_state)
-            current_property_status = self._property_status_from_state(predicted_state)
-            rollout_steps.append({
-                'suffix_index': suffix_index,
-                'action': action,
-                'prediction_prompt': prediction_prompt,
-                'prediction_response': prediction_response,
-                'prediction_attempts': prediction_attempts,
-                'prediction_summary': prediction_bundle.get('response', ''),
-                'predicted_state': predicted_state,
-                'predicted_world_state': predicted_world_state,
-                'predicted_property_changes': self._diff_property_states(state, predicted_state),
-                'property_verification': predicted_state,
-            })
+        predicted_ap_state = prediction_bundle['ap_results']
+        full_ap_trace = preceding_ap_trace + [predicted_ap_state]
+        tlc_result = verify_ap_trace(full_ap_trace, _AP_NAMES, is_complete_trace=is_last_step)
+        passed = tlc_result['tlc_result'].get('success') or tlc_result['tlc_result'].get('skipped')
 
-            if not predicted_state.get('all_satisfied', False):
-                return {
-                    'success': False,
-                    'verified_prefix': verified_prefix,
-                    'last_valid_state': state,
-                    'last_valid_world_state': world_state,
-                    'steps': rollout_steps,
-                    'failure': {
-                        'type': 'property_violation',
-                        'suffix_index': suffix_index,
-                        'action': action,
-                        'violations': predicted_state.get('violations', []),
-                        'changed_properties': self._diff_property_states(state, predicted_state),
-                        'verified_prefix_length': len(verified_prefix),
-                    },
-                }
+        detail = {
+            'prediction_prompt': prediction_prompt,
+            'prediction_response': prediction_response,
+            'prediction_attempts': prediction_attempts,
+            'prediction_summary': prediction_bundle.get('response', ''),
+            'predicted_ap_state': predicted_ap_state,
+            'predicted_ap_changes': self._diff_ap_states(current_state, predicted_ap_state),
+            'tla_verification': tlc_result,
+        }
 
-            verified_prefix.append(action)
-            state = predicted_state
-            world_state = predicted_world_state
+        if not passed:
+            return {
+                'passed': False,
+                'predicted_ap_state': predicted_ap_state,
+                'failure': {
+                    'type': 'tla_property_violation',
+                    'action': action,
+                    'violations': tlc_result['tlc_result'].get('violations', []),
+                    'message': 'TLC found property violations after action.',
+                },
+                'prediction_detail': detail,
+            }
 
         return {
-            'success': True,
-            'verified_prefix': verified_prefix,
-            'final_state': state,
-            'final_world_state': world_state,
-            'steps': rollout_steps,
+            'passed': True,
+            'predicted_ap_state': predicted_ap_state,
+            'failure': None,
+            'prediction_detail': detail,
         }
 
     def _build_suffix_plan_prompt(
@@ -609,22 +700,18 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
         request: str,
         action_help: str,
         current_state: Dict[str, object],
-        current_world_state: Dict[str, object],
+        init_world_state: Dict[str, object],
         accepted_trace: List[Dict[str, object]],
         failed_attempts: List[Dict[str, object]],
+        banned_first_actions: Optional[List[Dict[str, object]]] = None,
     ) -> str:
-        current_property_bools = {
-            item['id']: item['satisfied']
-            for item in current_state.get('property_results', [])
-            if isinstance(item.get('id'), str) and isinstance(item.get('satisfied'), bool)
-        }
+        current_ap_bools = dict(current_state) if isinstance(current_state, dict) else {}
         return SUFFIX_PLAN_USER_PROMPT_TEMPLATE.format(
             request=request,
-            grounding_verdict=self._grounding_verdict_text(current_world_state, request),
-            current_property_bools_json=self._snapshot_json(current_property_bools),
-            current_world_state_json=self._snapshot_json(current_world_state),
+            grounding_verdict=self._grounding_verdict_text(init_world_state, request),
+            current_ap_bools_json=self._snapshot_json(current_ap_bools),
             planning_state_summary=self._planning_state_summary(
-                current_world_state,
+                init_world_state,
                 accepted_trace,
                 request=request,
             ),
@@ -632,187 +719,806 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             property_text=self._property_text,
             action_help=action_help,
             failed_attempts_json=self._json_or_none(failed_attempts[-5:]) if failed_attempts else 'None',
+            banned_first_actions_json=self._json_or_none(banned_first_actions) if banned_first_actions else 'None',
         )
 
-    def _build_property_state_prediction_prompt(
+    def _build_ap_state_prediction_prompt(
         self,
         *,
-        current_state: Dict[str, object],
-        current_world_state: Dict[str, object],
+        current_ap_state: Dict[str, bool],
         action: Dict[str, object],
+        init_world_state: Dict[str, object],
+        accepted_trace: List[Dict[str, object]],
     ) -> str:
-        current_property_bools = {
-            item['id']: item['satisfied']
-            for item in current_state.get('property_results', [])
-            if isinstance(item.get('id'), str) and isinstance(item.get('satisfied'), bool)
-        }
-        return PROPERTY_STATE_PREDICTION_PROMPT_TEMPLATE.format(
-            current_property_bools_json=self._snapshot_json(current_property_bools),
-            current_world_state_json=self._snapshot_json(current_world_state),
+        ap_catalog_text = '\n'.join(
+            self._ap_formula(ap['name']) for ap in _AP_CANDIDATES
+        )
+        return AP_STATE_PREDICTION_PROMPT_TEMPLATE.format(
+            init_world_state_json=self._snapshot_json(init_world_state),
+            accepted_trace_json=self._json_or_none(accepted_trace),
+            world_state_delta=self._world_state_delta_summary(init_world_state, accepted_trace),
+            current_ap_bools_json=self._snapshot_json(current_ap_state),
             action_json=self._json_or_none(action),
-            property_text=self._property_text,
+            ap_catalog_text=ap_catalog_text,
         )
 
-    def _request_property_state_prediction(
+    def _execute_grasper_cleanup(self, trace: Dict[str, object]) -> None:
+        """After plan execution, bring the grasper to a clean state (raised, open).
+
+        Reads the live world state and runs only what is safe:
+          lowered + closed + holding + supported  → open_grasper, raise_grasper
+          lowered + closed + holding + unsupported → nothing
+          lowered + closed + empty                → raise_grasper
+          lowered + open                          → raise_grasper
+          raised  + closed + empty                → open_grasper
+          raised  + closed + holding              → nothing
+          raised  + open                          → nothing
+
+        We avoid cleanup when the grasper is still holding an unsupported
+        object. In that state, auto-opening would fail and auto-raising would
+        silently keep the object airborne, which is not a safe generic
+        "cleanup" action.
+        """
+        state = self._env.snapshot()
+        lowered = bool(state.get('grasper_lowered', False))
+        closed = bool(state.get('grasper_closed', False))
+        grasped_object = state.get('grasped_object')
+        holding = grasped_object is not None
+        supported_for_release = self._cleanup_release_supported(state, grasped_object)
+
+        cleanup: List[Dict[str, object]] = []
+        cleanup_note = None
+        if lowered and closed and holding and supported_for_release:
+            cleanup = [
+                {'name': 'open_grasper', 'args': {}},
+                {'name': 'raise_grasper', 'args': {}},
+            ]
+        elif holding:
+            cleanup_note = (
+                'Skipped grasper cleanup because the grasper is still holding '
+                'an object that is not safely releasable.'
+            )
+        elif lowered:
+            cleanup = [{'name': 'raise_grasper', 'args': {}}]
+        elif closed:
+            cleanup = [{'name': 'open_grasper', 'args': {}}]
+
+        if cleanup_note:
+            trace.setdefault('cleanup_notes', []).append(cleanup_note)
+
+        for action in cleanup:
+            try:
+                result_text = self._env.execute_action(action)
+            except Exception as exc:
+                result_text = 'ERROR: %s' % exc
+            trace.setdefault('cleanup_steps', []).append({
+                'action': action,
+                'result': result_text,
+            })
+
+    @staticmethod
+    def _cleanup_release_supported(
+        state: Dict[str, object],
+        grasped_object: object,
+    ) -> bool:
+        if grasped_object is None:
+            return False
+        objects = state.get('objects', [])
+        held = next(
+            (obj for obj in objects if obj.get('obj_id') == grasped_object),
+            None,
+        )
+        if not held:
+            return False
+        support_id = held.get('resting_on')
+        if support_id is None:
+            return False
+        support = next(
+            (obj for obj in objects if obj.get('obj_id') == support_id),
+            None,
+        )
+        return bool(support and support.get('can_support'))
+
+    @staticmethod
+    def _save_tree_svg(planning_tree: Dict[str, object], trace_path: str) -> None:
+        """Write a companion SVG visualising the planning tree next to the trace JSON."""
+        import math
+
+        nodes_data = planning_tree.get('nodes', [])
+        if not nodes_data:
+            return
+
+        # ── Build summary from raw nodes (works for old traces too) ──────────
+        prop_re = re.compile(r'Property_(prop_[^\s]+?)(?:\s|$|\.)')
+
+        def _props(violations):
+            out = []
+            for v in violations:
+                for m in prop_re.finditer(str(v)):
+                    out.append(m.group(1).replace('_', '.', 1))
+            return sorted(set(out))
+
+        def _short_prop(p):
+            # prop.no_object_resting_on_10 → no_rest_on_10
+            # prop.lowered_eventually_raised → low_ev_raised
+            # prop.closed_eventually_open → closed_ev_open
+            # prop.object_4_on_6_stays_on_6 → obj4_on6_stays
+            label = p.replace('prop.', '')
+            replacements = [
+                ('no_object_resting_on_', 'no_rest_on_'),
+                ('some_object_resting_on_', 'rest_on_'),
+                ('object_', 'obj'),
+                ('_resting_on_', '_on_'),
+                ('_eventually_', '_ev_'),
+                ('_stays_on_', '_stays_on_'),
+                ('_not_on_', '_not_on_'),
+                ('_implies_next_closed', '_→closed'),
+            ]
+            for old, new in replacements:
+                label = label.replace(old, new)
+            return label
+
+        FTYPE_SHORT = {
+            'tla_property_violation': 'TLA✗',
+            'duplicate_first_action': 'dup',
+            'plan_too_long': 'too_long',
+            'prediction_error': 'pred_err',
+            'planning_error': 'plan_err',
+            'branch_exhausted': 'exhausted',
+            'max_depth': 'max_depth',
+            'child_failure': 'child✗',
+        }
+
+        RESULT_COLOR = {
+            'accepted': '#d4edda',
+            'accepted_with_replan': '#d4edda',
+            'finish': '#d4edda',
+            'backtracked': '#f8d7da',
+            'searching': '#fff3cd',
+        }
+        RESULT_STROKE = {
+            'accepted': '#28a745',
+            'accepted_with_replan': '#28a745',
+            'finish': '#28a745',
+            'backtracked': '#dc3545',
+            'searching': '#856404',
+        }
+
+        # ── Layout: tree-structural columns (not raw depth) ──────────────────
+        # col = tree level (0 = root, 1 = direct children of root, ...)
+        # depth is shown as a label on each node box, not used for x-position.
+        # Use parent_node_id as the authority for tree structure — children[]
+        # may be empty on passthrough "searching" nodes that are not branch points.
+        id_to_node = {n['node_id']: n for n in nodes_data}
+
+        # Build children map from parent_node_id links
+        children_of: Dict[int, List[int]] = {n['node_id']: [] for n in nodes_data}
+        for n in nodes_data:
+            pid = n.get('parent_node_id')
+            if pid is not None and pid in children_of:
+                children_of[pid].append(n['node_id'])
+
+        # BFS to assign tree level and order
+        node_level: Dict[int, int] = {}
+        bfs_order: List[int] = []
+        visited = set()
+        queue = [(nodes_data[0]['node_id'], 0)] if nodes_data else []
+        while queue:
+            nid, lvl = queue.pop(0)
+            if nid in visited:
+                continue
+            visited.add(nid)
+            bfs_order.append(nid)
+            node_level[nid] = lvl
+            for child_id in children_of.get(nid, []):
+                queue.append((child_id, lvl + 1))
+        for n in nodes_data:
+            if n['node_id'] not in visited:
+                bfs_order.append(n['node_id'])
+                node_level[n['node_id']] = 0
+
+        # ── Geometry ──────────────────────────────────────────────────────────
+        NODE_W = 220
+        NODE_H_BASE = 28      # header height
+        ATTEMPT_H = 16        # per attempt row height
+        COL_GAP = 60          # horizontal gap between columns
+        ROW_GAP = 18          # vertical gap between nodes in the same column
+        MARGIN = 30
+
+        def node_height(n):
+            return NODE_H_BASE + ATTEMPT_H * len(n.get('attempts', []))
+
+        # Column x positions: one per unique level
+        max_level = max(node_level.values()) if node_level else 0
+        col_x = {lvl: MARGIN + lvl * (NODE_W + COL_GAP) for lvl in range(max_level + 1)}
+
+        # y positions: stack nodes in BFS order within each column
+        col_cursor: Dict[int, float] = {lvl: MARGIN + 24 for lvl in range(max_level + 1)}
+        node_y: Dict[int, float] = {}
+        for nid in bfs_order:
+            lvl = node_level[nid]
+            node_y[nid] = col_cursor[lvl]
+            col_cursor[lvl] += node_height(id_to_node[nid]) + ROW_GAP
+
+        total_w = MARGIN + (max_level + 1) * (NODE_W + COL_GAP)
+        total_h = max(col_cursor.values()) + MARGIN + 50  # +50 for legend
+
+        # ── SVG helpers ───────────────────────────────────────────────────────
+        def esc(s):
+            return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+
+        lines = []
+
+        def rect(x, y, w, h, fill, stroke, rx=4):
+            lines.append('<rect x="%g" y="%g" width="%g" height="%g" rx="%g" '
+                         'fill="%s" stroke="%s" stroke-width="1.2"/>' % (x, y, w, h, rx, fill, stroke))
+
+        def text(x, y, content, anchor='start', size=10, bold=False, color='#222'):
+            fw = 'bold' if bold else 'normal'
+            lines.append('<text x="%g" y="%g" font-family="monospace" font-size="%g" '
+                         'font-weight="%s" text-anchor="%s" fill="%s">%s</text>'
+                         % (x, y, size, fw, anchor, color, esc(content)))
+
+        def line(x1, y1, x2, y2, color='#666', dash=''):
+            d_attr = ' stroke-dasharray="%s"' % dash if dash else ''
+            lines.append('<line x1="%g" y1="%g" x2="%g" y2="%g" '
+                         'stroke="%s" stroke-width="1.2"%s/>' % (x1, y1, x2, y2, color, d_attr))
+
+        def arrow(x1, y1, x2, y2, color='#555', label=''):
+            lines.append('<line x1="%g" y1="%g" x2="%g" y2="%g" '
+                         'stroke="%s" stroke-width="1.4" marker-end="url(#arr)"/>'
+                         % (x1, y1, x2, y2, color))
+            if label:
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2 - 4
+                lines.append('<text x="%g" y="%g" font-family="monospace" font-size="8" '
+                              'text-anchor="middle" fill="%s">%s</text>' % (mx, my, color, esc(label)))
+
+        # ── Draw ──────────────────────────────────────────────────────────────
+        lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+        lines.append('<svg xmlns="http://www.w3.org/2000/svg" '
+                     'width="%g" height="%g" viewBox="0 0 %g %g">'
+                     % (total_w, total_h, total_w, total_h))
+
+        # Defs: arrowhead marker
+        lines.append('<defs><marker id="arr" markerWidth="8" markerHeight="8" '
+                     'refX="6" refY="3" orient="auto">'
+                     '<path d="M0,0 L0,6 L8,3 z" fill="#555"/>'
+                     '</marker></defs>')
+
+        # Background
+        lines.append('<rect width="%g" height="%g" fill="#f9f9f9"/>' % (total_w, total_h))
+
+        # Column headers (tree level)
+        for lvl in range(max_level + 1):
+            cx = col_x[lvl] + NODE_W / 2
+            text(cx, MARGIN + 10, 'level %d' % lvl, anchor='middle', size=9, color='#888')
+
+        # Edges first (so nodes render on top)
+        feasible_path_nodes = set()
+        if planning_tree.get('feasible'):
+            # Walk from root following accepted children
+            cur = nodes_data[0]['node_id'] if nodes_data else None
+            while cur is not None:
+                feasible_path_nodes.add(cur)
+                n = id_to_node.get(cur)
+                if not n:
+                    break
+                # Find the accepted attempt's child
+                nxt = None
+                for a in n.get('attempts', []):
+                    if a.get('accepted') and a.get('child_node_id') is not None:
+                        nxt = a['child_node_id']
+                        break
+                cur = nxt
+
+        for n in nodes_data:
+            nid = n['node_id']
+            nx = col_x[node_level[nid]]
+            ny = node_y[nid]
+            nh = node_height(n)
+            # Right-centre of this node
+            src_x = nx + NODE_W
+            src_y = ny + nh / 2
+
+            for ai, attempt in enumerate(n.get('attempts', [])):
+                child_id = attempt.get('child_node_id')
+                if child_id is None:
+                    continue
+                child = id_to_node.get(child_id)
+                if child is None:
+                    continue
+                dst_x = col_x[node_level[child_id]]
+                dst_y = node_y[child_id] + node_height(child) / 2
+                on_path = (nid in feasible_path_nodes and child_id in feasible_path_nodes)
+                color = '#28a745' if on_path else '#888'
+                # Midpoint routing: go right from src, then down/up to dst
+                mid_x = src_x + COL_GAP / 2
+                lines.append('<polyline points="%g,%g %g,%g %g,%g %g,%g" '
+                             'fill="none" stroke="%s" stroke-width="%s" '
+                             'marker-end="url(#arr)"/>'
+                             % (src_x, src_y, mid_x, src_y, mid_x, dst_y, dst_x, dst_y,
+                                color, '2' if on_path else '1.2'))
+                lbl = 'a%d' % ai
+                text(mid_x + 2, min(src_y, dst_y) + abs(dst_y - src_y) / 2,
+                     lbl, size=8, color=color)
+
+        # Nodes
+        for n in nodes_data:
+            nid = n['node_id']
+            lvl = node_level[nid]
+            nx = col_x[lvl]
+            ny = node_y[nid]
+            nh = node_height(n)
+            result = n.get('result', 'searching')
+            fill = RESULT_COLOR.get(result, '#eee')
+            stroke = RESULT_STROKE.get(result, '#999')
+            on_path = nid in feasible_path_nodes
+
+            rect(nx, ny, NODE_W, nh, fill, '#28a745' if on_path else stroke, rx=5)
+
+            # Header: node id + depth + result
+            result_short = {
+                'accepted': 'accepted ✓',
+                'accepted_with_replan': 'replan ✓',
+                'finish': 'finish ✓',
+                'backtracked': 'backtracked ✗',
+                'searching': 'searching…',
+            }.get(result, result)
+            header = 'n%d  d=%d  %s' % (nid, n.get('depth', 0), result_short)
+            text(nx + 5, ny + 11, header, size=10, bold=True,
+                 color=RESULT_STROKE.get(result, '#333'))
+
+            # Separator line under header
+            line(nx, ny + NODE_H_BASE, nx + NODE_W, ny + NODE_H_BASE, color='#ccc')
+
+            # Attempt rows
+            for ai, attempt in enumerate(n.get('attempts', [])):
+                ay = ny + NODE_H_BASE + ai * ATTEMPT_H
+                accepted = attempt.get('accepted')
+                ftype = attempt.get('failure_type') or ''
+                props = attempt.get('violated_props') or []
+                viol_at = attempt.get('violation_at_suffix_step')
+                plan_len = attempt.get('plan_length')
+
+                # Row background for accepted attempt
+                if accepted:
+                    lines.append('<rect x="%g" y="%g" width="%g" height="%g" '
+                                 'fill="#c3e6cb" opacity="0.5"/>'
+                                 % (nx + 1, ay, NODE_W - 2, ATTEMPT_H))
+
+                # Bullet
+                dot_color = '#28a745' if accepted else '#dc3545' if ftype == 'tla_property_violation' else '#aaa'
+                lines.append('<circle cx="%g" cy="%g" r="3" fill="%s"/>'
+                             % (nx + 9, ay + ATTEMPT_H / 2, dot_color))
+
+                # Attempt label
+                fshort = FTYPE_SHORT.get(ftype, ftype[:8]) if ftype else ('✓' if accepted else '?')
+                prop_label = ' '.join(_short_prop(p) for p in props[:2])
+                at_label = ('@%d' % viol_at) if viol_at is not None else ''
+                pl_label = ('L%d' % plan_len) if plan_len else ''
+                parts = [fshort]
+                if prop_label:
+                    parts.append(prop_label)
+                if at_label:
+                    parts.append(at_label)
+                if pl_label:
+                    parts.append(pl_label)
+                row_text = ' '.join(parts)
+                text(nx + 16, ay + ATTEMPT_H - 4, row_text, size=9,
+                     color='#28a745' if accepted else '#555')
+
+        # Legend
+        lx, ly = MARGIN, total_h - 60
+        for i, (label, fill, stroke) in enumerate([
+            ('accepted', '#d4edda', '#28a745'),
+            ('backtracked', '#f8d7da', '#dc3545'),
+            ('searching', '#fff3cd', '#856404'),
+        ]):
+            rx2 = lx + i * 110
+            lines.append('<rect x="%g" y="%g" width="12" height="12" rx="2" '
+                         'fill="%s" stroke="%s" stroke-width="1"/>'
+                         % (rx2, ly, fill, stroke))
+            text(rx2 + 16, ly + 10, label, size=9, color='#444')
+
+        lines.append('</svg>')
+
+        svg_path = trace_path.replace('.json', '_tree.svg')
+        Path(svg_path).write_text('\n'.join(lines), encoding='utf-8')
+
+    @staticmethod
+    def _build_tree_summary(planning_tree: Dict[str, object]) -> List[Dict[str, object]]:
+        """Build a compact per-node summary for quick tree inspection.
+
+        Each entry contains only the fields needed to understand tree shape,
+        branching, depth, and which properties were violated where.
+        The full detail stays in planning_tree['nodes'].
+        """
+        # TLC replaces dots with underscores: prop.foo_bar → Property_prop_foo_bar.
+        # Match the underscored form and restore the first underscore to a dot.
+        prop_short = re.compile(r'Property_(prop_[^\s]+?)(?:\s|$|\.)')
+
+        def extract_props(violations: list) -> List[str]:
+            props = []
+            for v in violations:
+                for m in prop_short.finditer(str(v)):
+                    # Convert first underscore back to dot: prop_foo → prop.foo
+                    raw = m.group(1)
+                    restored = raw.replace('_', '.', 1)
+                    props.append(restored)
+            return sorted(set(props))
+
+        summary = []
+        for node in planning_tree.get('nodes', []):
+            attempt_summaries = []
+            for attempt in node.get('attempts', []):
+                fb = attempt.get('failure_feedback') or {}
+                ftype = fb.get('type', '')
+                violations = fb.get('violations', [])
+                props = extract_props(violations)
+
+                # Find the suffix step index where TLA first failed.
+                viol_suffix_idx = None
+                for step in attempt.get('predicted_rollout', []):
+                    tlc = step.get('tla_verification', {}).get('tlc_result', {})
+                    if not (tlc.get('success') or tlc.get('skipped')):
+                        viol_suffix_idx = step.get('suffix_index')
+                        break
+
+                plan_len = len(attempt.get('planner_decision', {}).get('plan', []))
+                attempt_summaries.append({
+                    'accepted': attempt.get('accepted'),
+                    'failure_type': ftype or None,
+                    'violated_props': props or None,
+                    'violation_at_suffix_step': viol_suffix_idx,
+                    'plan_length': plan_len if plan_len else None,
+                    'child_node_id': attempt.get('child_node_id'),
+                })
+
+            entry = {
+                'node_id': node['node_id'],
+                'parent_node_id': node.get('parent_node_id'),
+                'depth': node.get('depth'),
+                'result': node.get('result'),
+                'children': node.get('children', []),
+                'attempts': attempt_summaries,
+            }
+            summary.append(entry)
+        return summary
+
+    @staticmethod
+    def _zip_accepted_steps(
+        accepted_trace: List[Dict[str, object]],
+        preceding_ap_trace: List[Dict[str, bool]],
+    ) -> List[Dict[str, object]]:
+        """Pair each accepted action with the AP state it produced.
+
+        preceding_ap_trace[0] is the state before any accepted action.
+        preceding_ap_trace[i+1] is the state after accepted_trace[i].
+        Returns a list of {action, ap_state_after} dicts, one per accepted action.
+        """
+        steps = []
+        for i, action in enumerate(accepted_trace):
+            ap_after = preceding_ap_trace[i + 1] if i + 1 < len(preceding_ap_trace) else None
+            steps.append({
+                'action': copy.deepcopy(action),
+                'ap_state_after': copy.deepcopy(ap_after),
+            })
+        return steps
+
+    @staticmethod
+    def _ap_formula(name: str) -> str:
+        """Return a Python-style formula string for each AP name."""
+        # object_N_resting_on_M  →  parts: ['object', 'N', 'resting', 'on', 'M']
+        if name.startswith('object_') and '_resting_on_' in name:
+            tail = name[len('object_'):]          # 'N_resting_on_M'
+            obj_id, support = tail.split('_resting_on_')
+            return '%s: (object with obj_id==%s).resting_on == %s' % (name, obj_id, support)
+        # some_object_resting_on_N
+        if name.startswith('some_object_resting_on_'):
+            support = name[len('some_object_resting_on_'):]
+            return '%s: any object has resting_on == %s' % (name, support)
+        # grasper_closed / grasper_lowered
+        return '%s: world-state field %s is true' % (name, name)
+
+    @staticmethod
+    def _world_state_delta_summary(
+        init_world_state: Dict[str, object],
+        accepted_trace: List[Dict[str, object]],
+    ) -> str:
+        """Narrate what the accepted actions have done to the world state.
+
+        Tracks grasper_lowered, grasper_closed, grasped_object, and per-object
+        resting_on by replaying the known simulator effect rules symbolically.
+        This bridges the gap between init_world_state and the current predicted
+        moment without running the real simulator.
+        """
+        if not accepted_trace:
+            return 'No accepted actions yet — world state is identical to initial.'
+
+        grasper_lowered: bool = bool(init_world_state.get('grasper_lowered', False))
+        grasper_closed: bool = bool(init_world_state.get('grasper_closed', False))
+        grasped_object = init_world_state.get('grasped_object')
+
+        # Map obj_id -> resting_on from initial snapshot.
+        resting_on: Dict[int, object] = {}
+        for obj in init_world_state.get('objects', []):
+            if isinstance(obj, dict) and 'obj_id' in obj:
+                resting_on[int(obj['obj_id'])] = obj.get('resting_on')
+
+        # Map obj_id -> position (x, y) from initial snapshot (used to infer
+        # what object is below the grasper after move_grasper).
+        positions: Dict[int, Dict[str, float]] = {}
+        graspable: Dict[int, bool] = {}
+        for obj in init_world_state.get('objects', []):
+            if isinstance(obj, dict) and 'obj_id' in obj:
+                oid = int(obj['obj_id'])
+                pos = obj.get('position', {})
+                if isinstance(pos, dict):
+                    positions[oid] = {'x': pos.get('x', 0.0), 'y': pos.get('y', 0.0)}
+                graspable[oid] = bool(obj.get('graspable', False))
+
+        grasper_x: float = 0.0
+        grasper_y: float = 0.0
+        grasper_pos = init_world_state.get('objects')  # not used directly; we track via move_grasper
+
+        lines = []
+        for action in accepted_trace:
+            name = action.get('name', '')
+            args = action.get('args', {}) or {}
+
+            if name == 'move_grasper':
+                grasper_x = float(args.get('x', grasper_x))
+                grasper_y = float(args.get('y', grasper_y))
+                if grasped_object is not None:
+                    lines.append(
+                        'move_grasper(x=%.4f, y=%.4f): grasper (holding obj %s) moved to (%.4f, %.4f).'
+                        % (grasper_x, grasper_y, grasped_object, grasper_x, grasper_y)
+                    )
+                else:
+                    lines.append(
+                        'move_grasper(x=%.4f, y=%.4f): grasper moved to (%.4f, %.4f), holding nothing.'
+                        % (grasper_x, grasper_y, grasper_x, grasper_y)
+                    )
+
+            elif name == 'lower_grasper':
+                if grasper_lowered:
+                    lines.append('lower_grasper: PRECONDITION FAILED (already lowered) — no state change.')
+                else:
+                    grasper_lowered = True
+                    # Find the object at the grasper's (x, y) to infer resting_on.
+                    tol = 1e-4
+                    obj_below = next(
+                        (oid for oid, pos in positions.items()
+                         if abs(pos['x'] - grasper_x) <= tol and abs(pos['y'] - grasper_y) <= tol
+                         and oid != grasped_object),
+                        None,
+                    )
+                    if grasped_object is not None:
+                        old = resting_on.get(int(grasped_object))
+                        resting_on[int(grasped_object)] = obj_below
+                        lines.append(
+                            'lower_grasper: grasper_lowered=true. Held obj %s lowered; '
+                            'resting_on: %s → %s.'
+                            % (grasped_object, old, obj_below)
+                        )
+                    else:
+                        lines.append(
+                            'lower_grasper: grasper_lowered=true. '
+                            'Grasper empty; object below at (%.4f, %.4f): %s.'
+                            % (grasper_x, grasper_y, obj_below)
+                        )
+
+            elif name == 'raise_grasper':
+                if not grasper_lowered:
+                    lines.append('raise_grasper: PRECONDITION FAILED (already raised) — no state change.')
+                else:
+                    grasper_lowered = False
+                    if grasped_object is not None:
+                        old = resting_on.get(int(grasped_object))
+                        resting_on[int(grasped_object)] = None
+                        lines.append(
+                            'raise_grasper: grasper_lowered=false. Held obj %s lifted; '
+                            'resting_on: %s → None (airborne).'
+                            % (grasped_object, old)
+                        )
+                    else:
+                        lines.append('raise_grasper: grasper_lowered=false. Grasper empty, raised.')
+
+            elif name == 'close_grasper':
+                if grasper_closed:
+                    lines.append('close_grasper: PRECONDITION FAILED (already closed) — no state change.')
+                else:
+                    grasper_closed = True
+                    if grasper_lowered:
+                        tol = 1e-4
+                        obj_below = next(
+                            (oid for oid, pos in positions.items()
+                             if abs(pos['x'] - grasper_x) <= tol and abs(pos['y'] - grasper_y) <= tol),
+                            None,
+                        )
+                        if obj_below is not None and graspable.get(obj_below, False):
+                            grasped_object = obj_below
+                            lines.append(
+                                'close_grasper: grasper_closed=true. '
+                                'Grasper was lowered onto graspable obj %s → grasped_object=%s.'
+                                % (obj_below, grasped_object)
+                            )
+                        else:
+                            lines.append(
+                                'close_grasper: grasper_closed=true. '
+                                'Grasper lowered but no graspable object at (%.4f, %.4f) → grasped_object stays null.'
+                                % (grasper_x, grasper_y)
+                            )
+                    else:
+                        lines.append(
+                            'close_grasper: grasper_closed=true. '
+                            'Grasper not lowered → grasped_object stays null.'
+                        )
+
+            elif name == 'open_grasper':
+                if not grasper_closed:
+                    lines.append('open_grasper: PRECONDITION FAILED (already open) — no state change.')
+                else:
+                    if grasped_object is not None:
+                        if not grasper_lowered:
+                            lines.append(
+                                'open_grasper: PRECONDITION FAILED — holding obj %s but grasper not lowered. '
+                                'No state change.'
+                                % grasped_object
+                            )
+                        else:
+                            support = resting_on.get(int(grasped_object))
+                            if support is None:
+                                lines.append(
+                                    'open_grasper: PRECONDITION FAILED — holding obj %s but resting_on is null '
+                                    '(no support). No state change.'
+                                    % grasped_object
+                                )
+                            else:
+                                lines.append(
+                                    'open_grasper: grasper_closed=false. '
+                                    'Released obj %s; it stays resting_on=%s. grasped_object=null.'
+                                    % (grasped_object, support)
+                                )
+                                grasped_object = None
+                                grasper_closed = False
+                    else:
+                        grasper_closed = False
+                        lines.append('open_grasper: grasper_closed=false. Was not holding anything.')
+
+        # Emit current inferred state.
+        resting_on_changes = []
+        for obj in init_world_state.get('objects', []):
+            if not isinstance(obj, dict):
+                continue
+            oid = int(obj.get('obj_id', -1))
+            if oid < 0:
+                continue
+            init_ro = obj.get('resting_on')
+            curr_ro = resting_on.get(oid, init_ro)
+            if curr_ro != init_ro:
+                resting_on_changes.append('  obj %d: resting_on %s → %s' % (oid, init_ro, curr_ro))
+
+        summary_lines = [
+            'After %d accepted action(s):' % len(accepted_trace),
+        ] + lines + [
+            'Current inferred state:',
+            '  grasper_lowered: %s' % grasper_lowered,
+            '  grasper_closed: %s' % grasper_closed,
+            '  grasped_object: %s' % grasped_object,
+        ]
+        if resting_on_changes:
+            summary_lines.append('  resting_on changes from initial:')
+            summary_lines.extend(resting_on_changes)
+        else:
+            summary_lines.append('  resting_on: no changes from initial state.')
+        return '\n'.join(summary_lines)
+
+    def _request_ap_state_prediction(
         self,
         history: List[Dict[str, str]],
-        current_state: Dict[str, object],
-        current_world_state: Dict[str, object],
+        current_ap_state: Dict[str, bool],
     ):
-        content = self._chat(list(history), schema=PROPERTY_STATE_SCHEMA).strip()
-        bundle = self._force_parse_property_state_prediction(content, current_state, current_world_state)
+        content = self._chat(list(history), schema=AP_STATE_SCHEMA).strip()
+        bundle = self._parse_ap_state_prediction(content, current_ap_state)
         attempt_log = [{'raw_content': content, 'parsed_prediction': bundle}]
         return content, bundle, attempt_log
 
-    def _force_parse_property_state_prediction(
+    def _parse_ap_state_prediction(
         self,
         content: str,
-        current_state: Dict[str, object],
-        current_world_state: Dict[str, object],
+        current_ap_state: Dict[str, bool],
     ) -> Dict[str, object]:
-        """Parse the predicted property state with a guaranteed result.
+        """Parse the predicted AP state with a guaranteed result.
 
         Extraction order: JSON parse → regex scan → fallback to current state.
-        Any property id not recovered from the model output is copied from
-        current_state so the result is always complete.
+        Any AP not recovered from the model output is copied from current_ap_state.
         """
-        known_ids = {str(spec.get('id')) for spec in self._property_verifier.properties}
-        current_status = self._property_status_from_state(current_state)
-
         extracted: Dict[str, bool] = {}
-        decision = {}
-        predicted_world_state = None
         response_text = ''
 
-        # 1. Try JSON parse via the standard extractor.
+        # 1. Try JSON parse.
         try:
             json_content = OllamaShrdluAgent._extract_json_object(content)
             decision = json.loads(json_content)
             if isinstance(decision, dict):
-                nested_decision = self._parse_nested_prediction_response(decision.get('response'))
-                if nested_decision:
-                    for key in ('predicted_state', 'predicted_world_state'):
-                        if key not in decision and key in nested_decision:
-                            decision[key] = nested_decision[key]
-                    if nested_decision.get('response'):
-                        decision['response'] = nested_decision['response']
-                pr = decision.get('predicted_state', {}).get('property_results')
-                if isinstance(pr, list):
-                    for item in pr:
-                        pid = item.get('id')
-                        sat = item.get('satisfied')
-                        if isinstance(pid, str) and pid in known_ids and isinstance(sat, bool):
-                            extracted[pid] = sat
-                predicted_world_state = decision.get('predicted_world_state')
+                ap_results = decision.get('ap_results')
+                if isinstance(ap_results, dict):
+                    for name in _AP_NAMES:
+                        val = ap_results.get(name)
+                        if isinstance(val, bool):
+                            extracted[name] = val
                 response_text = str(decision.get('response', ''))
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # 2. Regex scan for any ids still missing.
-        if len(extracted) < len(known_ids):
-            for pid in known_ids - set(extracted):
-                pattern = r'"id"\s*:\s*"' + re.escape(pid) + r'"[^}]*?"satisfied"\s*:\s*(true|false)'
+        # 2. Regex scan for any APs still missing.
+        if len(extracted) < len(_AP_NAMES):
+            for name in _AP_NAMES:
+                if name in extracted:
+                    continue
+                pattern = r'"' + re.escape(name) + r'"\s*:\s*(true|false)'
                 m = re.search(pattern, content)
-                if not m:
-                    pattern = r'"satisfied"\s*:\s*(true|false)[^}]*?"id"\s*:\s*"' + re.escape(pid) + r'"'
-                    m = re.search(pattern, content)
                 if m:
-                    extracted[pid] = m.group(1) == 'true'
+                    extracted[name] = m.group(1) == 'true'
 
-        # 3. Fill remaining gaps from current_state (assume no change).
-        for pid in known_ids - set(extracted):
-            extracted[pid] = current_status.get(pid, False)
-
-        property_results = [{'id': pid, 'satisfied': extracted[pid]} for pid in known_ids]
-        normalized_state = self._property_state_from_results(property_results)
-
-        normalized_world_state = copy.deepcopy(current_world_state)
-        if isinstance(predicted_world_state, dict):
-            normalized_world_state = self._merge_predicted_state(current_world_state, predicted_world_state)
+        # 3. Fill remaining gaps from current_ap_state (assume no change).
+        for name in _AP_NAMES:
+            if name not in extracted:
+                extracted[name] = bool(current_ap_state.get(name, False))
 
         return {
             'response': response_text,
-            'predicted_state': normalized_state,
-            'predicted_world_state': normalized_world_state,
+            'ap_results': {name: extracted[name] for name in _AP_NAMES},
         }
 
     @staticmethod
-    def _parse_nested_prediction_response(response_value) -> Optional[Dict[str, object]]:
-        if not isinstance(response_value, str):
-            return None
-        response_value = response_value.strip()
-        if not response_value:
-            return None
-        try:
-            nested_content = OllamaShrdluAgent._extract_json_object(response_value)
-            nested_decision = json.loads(nested_content)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        return nested_decision if isinstance(nested_decision, dict) else None
+    def _collect_violated_properties(failure: Optional[Dict[str, object]]) -> List[str]:
+        """Recursively collect all unique property IDs that were violated in a failure tree.
 
-    def _build_initial_property_state(
-        self,
-        world_state: Dict[str, object],
-        *,
-        scene,
-    ) -> Dict[str, object]:
-        verification = self._property_verifier.verify_transition(
-            world_state,
-            {'name': 'initial_state', 'args': {}},
-            world_state,
-            pre_scene=scene,
-            post_scene=scene,
-        )
-        return self._property_state_from_results(verification.get('property_results', []))
+        TLC violation entries are raw stdout lines such as:
+          'Error: Property Property_prop_foo_bar is violated.'
+        This extracts the prop.* id by stripping the 'Property_' prefix.
+        """
+        if not failure:
+            return []
+        seen: set = set()
 
-    def _property_state_from_results(self, property_results: List[Dict[str, object]]) -> Dict[str, object]:
-        normalized_results = []
-        for spec in self._property_verifier.properties:
-            property_id = spec.get('id')
-            match = next(
-                (item for item in property_results if item.get('id') == property_id),
-                None,
-            )
-            satisfied = bool(match.get('satisfied', False)) if match is not None else False
-            normalized_results.append({
-                'id': property_id,
-                'natural_language': spec.get('natural_language'),
-                'satisfied': satisfied,
-            })
-        violations = [item for item in normalized_results if not item['satisfied']]
-        return {
-            'all_satisfied': not violations,
-            'violations': copy.deepcopy(violations),
-            'property_results': normalized_results,
-        }
+        def _extract(violation_str: str) -> Optional[str]:
+            m = re.search(r'Property_(prop\.[^\s.]+)', str(violation_str))
+            return m.group(1) if m else None
+
+        def _walk(f):
+            if not isinstance(f, dict):
+                return
+            if f.get('type') == 'tla_property_violation':
+                for v in f.get('violations', []):
+                    prop_id = _extract(v)
+                    if prop_id:
+                        seen.add(prop_id)
+            for v in f.get('failed_attempts', []):
+                _walk(v)
+            if f.get('child_failure'):
+                _walk(f['child_failure'])
+
+        _walk(failure)
+        return sorted(seen)
 
     @staticmethod
-    def _property_status_from_state(state: Dict[str, object]) -> Dict[str, bool]:
-        status = {}
-        for item in state.get('property_results', []):
-            if isinstance(item, dict) and 'id' in item:
-                status[str(item['id'])] = bool(item.get('satisfied', False))
-        return status
-
-    @classmethod
-    def _diff_property_states(
-        cls,
-        previous_state: Dict[str, object],
-        current_state: Dict[str, object],
+    def _diff_ap_states(
+        previous: Dict[str, bool],
+        current: Dict[str, bool],
     ) -> List[Dict[str, object]]:
-        previous_status = cls._property_status_from_state(previous_state)
-        current_status = cls._property_status_from_state(current_state)
-        changed_properties = []
-        for property_id, current_value in current_status.items():
-            previous_value = previous_status.get(property_id)
-            if previous_value is None or previous_value == current_value:
-                continue
-            changed_properties.append({
-                'id': property_id,
-                'before': previous_value,
-                'after': current_value,
-            })
-        return changed_properties
+        changes = []
+        for name in _AP_NAMES:
+            prev_val = previous.get(name)
+            curr_val = current.get(name)
+            if prev_val is not None and prev_val != curr_val:
+                changes.append({'name': name, 'before': prev_val, 'after': curr_val})
+        return changes
+
+    def _build_initial_ap_state(self, world_state: Dict[str, object]) -> Dict[str, bool]:
+        return self._property_verifier._evaluate_state_aps(world_state)
 
     @staticmethod
     def _parse_plan(content: str) -> Dict[str, object]:

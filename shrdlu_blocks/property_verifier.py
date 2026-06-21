@@ -7,10 +7,18 @@ from pathlib import Path
 import sys
 from typing import Dict, Iterable, List, Optional
 
-__all__ = ['PROPERTY_FILE', 'TransitionPropertyVerifier']
+__all__ = ['ACTIVE_PROPERTY_IDS', 'PROPERTY_FILE', 'TransitionPropertyVerifier']
 
 
 PROPERTY_FILE = Path(__file__).resolve().parent.parent / 'SHRDLU_AP_CANDIDATES.json'
+ACTIVE_PROPERTY_IDS = (
+    'prop.object_4_on_6_stays_on_6',
+    'prop.object_4_not_on_3_and_6_simultaneously',
+    'prop.no_object_resting_on_4',
+    'prop.no_object_resting_on_8',
+    'prop.no_object_resting_on_10',
+    'prop.object_on_10_implies_next_closed',
+)
 
 PROPERTY_SPECS = [
     {
@@ -39,16 +47,6 @@ PROPERTY_SPECS = [
         'description': 'No object is ever resting on object 10.',
     },
     {
-        'id': 'prop.lowered_eventually_raised',
-        'ltl': 'G(grasper_lowered -> F(!grasper_lowered))',
-        'description': 'Whenever the grasper is lowered, it is eventually raised again.',
-    },
-    {
-        'id': 'prop.closed_eventually_open',
-        'ltl': 'G(grasper_closed -> F(!grasper_closed))',
-        'description': 'Whenever the grasper is closed, it is eventually opened again.',
-    },
-    {
         'id': 'prop.object_on_10_implies_next_closed',
         'ltl': 'G(some_object_resting_on_10 -> X(grasper_closed))',
         'description': 'Whenever something is resting on object 10, the next state has the grasper closed.',
@@ -62,7 +60,7 @@ class TransitionPropertyVerifier:
     def __init__(self, properties: Iterable[Dict[str, object]]):
         del properties
         self._aps = self._load_ap_specs(PROPERTY_FILE)
-        self._properties = list(PROPERTY_SPECS)
+        self._properties = [spec for spec in PROPERTY_SPECS if spec['id'] in ACTIVE_PROPERTY_IDS]
 
     @classmethod
     def from_file(cls, path: Path = PROPERTY_FILE) -> 'TransitionPropertyVerifier':

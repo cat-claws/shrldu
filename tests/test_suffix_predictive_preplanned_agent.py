@@ -10,6 +10,37 @@ from shrdlu_blocks.suffix_predictive_preplanned_agent import (
 
 
 class SuffixPredictivePreplannedAgentTests(unittest.TestCase):
+    def test_suffix_cleanup_skips_unsupported_held_object(self):
+        class FakeEnv:
+            def __init__(self):
+                self.actions = []
+
+            def snapshot(self):
+                return {
+                    'grasper_lowered': True,
+                    'grasper_closed': True,
+                    'grasped_object': 4,
+                    'objects': [
+                        {'obj_id': 4, 'resting_on': None, 'can_support': False},
+                        {'obj_id': 9, 'resting_on': 1, 'can_support': True},
+                    ],
+                }
+
+            def execute_action(self, action):
+                self.actions.append(action)
+                return 'OK'
+
+        agent = object.__new__(SuffixPredictivePreplannedOllamaShrdluAgent)
+        agent._env = FakeEnv()
+        trace = {}
+
+        agent._execute_grasper_cleanup(trace)
+
+        self.assertEqual([], agent._env.actions)
+        self.assertNotIn('cleanup_steps', trace)
+        self.assertIn('cleanup_notes', trace)
+        self.assertIn('Skipped grasper cleanup', trace['cleanup_notes'][0])
+
     def test_suffix_predictive_parser_recovers_nested_world_state_from_response_string(self):
         agent = SuffixPredictivePreplannedOllamaShrdluAgent(
             ShrdluBlocksEnv(),

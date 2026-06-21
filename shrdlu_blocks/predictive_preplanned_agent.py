@@ -44,7 +44,6 @@ Rules:
 - Match every user-mentioned destination attribute that exists in the scene representation, including kind, color, size, height, width, and supportability when relevant.
 - Bind all user-mentioned attributes to one single object. For example, "green small block" means one object with color=green, kind=block, and size=small; it does not mean a green object on top of a small block.
 - Never combine attributes across stacked or co-located objects.
-- If no exact source or destination object matches the request, return the finish action instead of substituting a near match.
 - For pick/place or stacking goals, ground move_grasper(x, y) by copying the exact x and y of the chosen source or destination object.
 - For pick/place or stacking goals, never choose open_grasper unless the current predicted state shows the held object is lowered onto a destination object that can support it.
 - Do not undo a previously accepted action unless the current predicted state makes that reversal necessary for the goal.
@@ -52,6 +51,7 @@ Rules:
 - Do not repeat the exact same primitive action with the exact same args if the current predicted state already reflects that action's effect.
 - If the goal is already satisfied in the current predicted state, return the finish action immediately.
 - Do not output more than one action.
+- Use the grounding context as planning input, not as a user-facing refusal template.
 - Do not explain alternatives or reasoning.
 - Keep the response short and factual.
 
@@ -775,13 +775,14 @@ class _PredictivePreplannedShrdluAgentMixin:
             return '; '.join(parts)
 
         return '\n'.join([
-            'Grounding verdict:',
+            'Grounding context:',
             'Source phrase: %s' % source_phrase,
             'Destination phrase: %s' % destination_phrase,
             'Relevant source objects: %s' % labels(grounding['exact_source_matches']),
             'Relevant destination objects: %s' % labels(grounding['exact_destination_matches']),
             'Destination binding rule: choose one destination object id from the described candidates; do not merge attributes across nearby, stacked, or co-located objects.',
             'Invalid binding example: a red small block plus a green pyramid at the same x,y does not equal a green small block.',
+            'Plan; do not refuse.',
         ])
 
     @classmethod

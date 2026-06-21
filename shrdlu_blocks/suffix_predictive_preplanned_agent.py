@@ -273,8 +273,6 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             trace['final_message'] = final_message
             trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
             trace_path = self._write_trace(trace, trace_path)
-            if trace_path:
-                self._save_tree_svg(trace['planning_tree'], trace_path)
             return self._append_trace_notice(final_message, trace_path)
 
         plan = result['plan']
@@ -292,8 +290,6 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             trace['final_message'] = finish_response
             trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
             trace_path = self._write_trace(trace, trace_path)
-            if trace_path:
-                self._save_tree_svg(trace['planning_tree'], trace_path)
             return finish_response if response_text == finish_response else self._format_reply(
                 response_text,
                 finish_response,
@@ -333,8 +329,6 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                 trace['final_message'] = final_message
                 trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
                 trace_path = self._write_trace(trace, trace_path)
-                if trace_path:
-                    self._save_tree_svg(trace['planning_tree'], trace_path)
                 return self._append_trace_notice(final_message, trace_path)
 
         # Post-execution grasper cleanup: if the grasper is not already raised and
@@ -349,8 +343,6 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
         trace['final_message'] = final_message
         trace['planning_tree']['tree_summary'] = self._build_tree_summary(trace['planning_tree'])
         trace_path = self._write_trace(trace, trace_path)
-        if trace_path:
-            self._save_tree_svg(trace['planning_tree'], trace_path)
         return final_message
 
     def _search_plan_suffix(
@@ -818,312 +810,6 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             None,
         )
         return bool(support and support.get('can_support'))
-
-    @staticmethod
-    def _save_tree_svg(planning_tree: Dict[str, object], trace_path: str) -> None:
-        """Write a companion SVG visualising the planning tree next to the trace JSON."""
-        import math
-
-        nodes_data = planning_tree.get('nodes', [])
-        if not nodes_data:
-            return
-
-        # ── Build summary from raw nodes (works for old traces too) ──────────
-        prop_re = re.compile(r'Property_(prop_[^\s]+?)(?:\s|$|\.)')
-
-        def _props(violations):
-            out = []
-            for v in violations:
-                for m in prop_re.finditer(str(v)):
-                    out.append(m.group(1).replace('_', '.', 1))
-            return sorted(set(out))
-
-        def _short_prop(p):
-            # prop.no_object_resting_on_10 → no_rest_on_10
-            # prop.lowered_eventually_raised → low_ev_raised
-            # prop.closed_eventually_open → closed_ev_open
-            # prop.object_4_on_6_stays_on_6 → obj4_on6_stays
-            label = p.replace('prop.', '')
-            replacements = [
-                ('no_object_resting_on_', 'no_rest_on_'),
-                ('some_object_resting_on_', 'rest_on_'),
-                ('object_', 'obj'),
-                ('_resting_on_', '_on_'),
-                ('_eventually_', '_ev_'),
-                ('_stays_on_', '_stays_on_'),
-                ('_not_on_', '_not_on_'),
-                ('_implies_next_closed', '_→closed'),
-            ]
-            for old, new in replacements:
-                label = label.replace(old, new)
-            return label
-
-        FTYPE_SHORT = {
-            'tla_property_violation': 'TLA✗',
-            'duplicate_first_action': 'dup',
-            'plan_too_long': 'too_long',
-            'prediction_error': 'pred_err',
-            'planning_error': 'plan_err',
-            'branch_exhausted': 'exhausted',
-            'max_depth': 'max_depth',
-            'child_failure': 'child✗',
-        }
-
-        RESULT_COLOR = {
-            'accepted': '#d4edda',
-            'accepted_with_replan': '#d4edda',
-            'finish': '#d4edda',
-            'backtracked': '#f8d7da',
-            'searching': '#fff3cd',
-        }
-        RESULT_STROKE = {
-            'accepted': '#28a745',
-            'accepted_with_replan': '#28a745',
-            'finish': '#28a745',
-            'backtracked': '#dc3545',
-            'searching': '#856404',
-        }
-
-        # ── Layout: tree-structural columns (not raw depth) ──────────────────
-        # col = tree level (0 = root, 1 = direct children of root, ...)
-        # depth is shown as a label on each node box, not used for x-position.
-        # Use parent_node_id as the authority for tree structure — children[]
-        # may be empty on passthrough "searching" nodes that are not branch points.
-        id_to_node = {n['node_id']: n for n in nodes_data}
-
-        # Build children map from parent_node_id links
-        children_of: Dict[int, List[int]] = {n['node_id']: [] for n in nodes_data}
-        for n in nodes_data:
-            pid = n.get('parent_node_id')
-            if pid is not None and pid in children_of:
-                children_of[pid].append(n['node_id'])
-
-        # BFS to assign tree level and order
-        node_level: Dict[int, int] = {}
-        bfs_order: List[int] = []
-        visited = set()
-        queue = [(nodes_data[0]['node_id'], 0)] if nodes_data else []
-        while queue:
-            nid, lvl = queue.pop(0)
-            if nid in visited:
-                continue
-            visited.add(nid)
-            bfs_order.append(nid)
-            node_level[nid] = lvl
-            for child_id in children_of.get(nid, []):
-                queue.append((child_id, lvl + 1))
-        for n in nodes_data:
-            if n['node_id'] not in visited:
-                bfs_order.append(n['node_id'])
-                node_level[n['node_id']] = 0
-
-        # ── Geometry ──────────────────────────────────────────────────────────
-        NODE_W = 220
-        NODE_H_BASE = 28      # header height
-        ATTEMPT_H = 16        # per attempt row height
-        COL_GAP = 60          # horizontal gap between columns
-        ROW_GAP = 18          # vertical gap between nodes in the same column
-        MARGIN = 30
-
-        def node_height(n):
-            return NODE_H_BASE + ATTEMPT_H * len(n.get('attempts', []))
-
-        # Column x positions: one per unique level
-        max_level = max(node_level.values()) if node_level else 0
-        col_x = {lvl: MARGIN + lvl * (NODE_W + COL_GAP) for lvl in range(max_level + 1)}
-
-        # y positions: stack nodes in BFS order within each column
-        col_cursor: Dict[int, float] = {lvl: MARGIN + 24 for lvl in range(max_level + 1)}
-        node_y: Dict[int, float] = {}
-        for nid in bfs_order:
-            lvl = node_level[nid]
-            node_y[nid] = col_cursor[lvl]
-            col_cursor[lvl] += node_height(id_to_node[nid]) + ROW_GAP
-
-        total_w = MARGIN + (max_level + 1) * (NODE_W + COL_GAP)
-        total_h = max(col_cursor.values()) + MARGIN + 50  # +50 for legend
-
-        # ── SVG helpers ───────────────────────────────────────────────────────
-        def esc(s):
-            return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-
-        lines = []
-
-        def rect(x, y, w, h, fill, stroke, rx=4):
-            lines.append('<rect x="%g" y="%g" width="%g" height="%g" rx="%g" '
-                         'fill="%s" stroke="%s" stroke-width="1.2"/>' % (x, y, w, h, rx, fill, stroke))
-
-        def text(x, y, content, anchor='start', size=10, bold=False, color='#222'):
-            fw = 'bold' if bold else 'normal'
-            lines.append('<text x="%g" y="%g" font-family="monospace" font-size="%g" '
-                         'font-weight="%s" text-anchor="%s" fill="%s">%s</text>'
-                         % (x, y, size, fw, anchor, color, esc(content)))
-
-        def line(x1, y1, x2, y2, color='#666', dash=''):
-            d_attr = ' stroke-dasharray="%s"' % dash if dash else ''
-            lines.append('<line x1="%g" y1="%g" x2="%g" y2="%g" '
-                         'stroke="%s" stroke-width="1.2"%s/>' % (x1, y1, x2, y2, color, d_attr))
-
-        def arrow(x1, y1, x2, y2, color='#555', label=''):
-            lines.append('<line x1="%g" y1="%g" x2="%g" y2="%g" '
-                         'stroke="%s" stroke-width="1.4" marker-end="url(#arr)"/>'
-                         % (x1, y1, x2, y2, color))
-            if label:
-                mx, my = (x1 + x2) / 2, (y1 + y2) / 2 - 4
-                lines.append('<text x="%g" y="%g" font-family="monospace" font-size="8" '
-                              'text-anchor="middle" fill="%s">%s</text>' % (mx, my, color, esc(label)))
-
-        # ── Draw ──────────────────────────────────────────────────────────────
-        lines.append('<?xml version="1.0" encoding="UTF-8"?>')
-        lines.append('<svg xmlns="http://www.w3.org/2000/svg" '
-                     'width="%g" height="%g" viewBox="0 0 %g %g">'
-                     % (total_w, total_h, total_w, total_h))
-
-        # Defs: arrowhead marker
-        lines.append('<defs><marker id="arr" markerWidth="8" markerHeight="8" '
-                     'refX="6" refY="3" orient="auto">'
-                     '<path d="M0,0 L0,6 L8,3 z" fill="#555"/>'
-                     '</marker></defs>')
-
-        # Background
-        lines.append('<rect width="%g" height="%g" fill="#f9f9f9"/>' % (total_w, total_h))
-
-        # Column headers (tree level)
-        for lvl in range(max_level + 1):
-            cx = col_x[lvl] + NODE_W / 2
-            text(cx, MARGIN + 10, 'level %d' % lvl, anchor='middle', size=9, color='#888')
-
-        # Edges first (so nodes render on top)
-        feasible_path_nodes = set()
-        if planning_tree.get('feasible'):
-            # Walk from root following accepted children
-            cur = nodes_data[0]['node_id'] if nodes_data else None
-            while cur is not None:
-                feasible_path_nodes.add(cur)
-                n = id_to_node.get(cur)
-                if not n:
-                    break
-                # Find the accepted attempt's child
-                nxt = None
-                for a in n.get('attempts', []):
-                    if a.get('accepted') and a.get('child_node_id') is not None:
-                        nxt = a['child_node_id']
-                        break
-                cur = nxt
-
-        for n in nodes_data:
-            nid = n['node_id']
-            nx = col_x[node_level[nid]]
-            ny = node_y[nid]
-            nh = node_height(n)
-            # Right-centre of this node
-            src_x = nx + NODE_W
-            src_y = ny + nh / 2
-
-            for ai, attempt in enumerate(n.get('attempts', [])):
-                child_id = attempt.get('child_node_id')
-                if child_id is None:
-                    continue
-                child = id_to_node.get(child_id)
-                if child is None:
-                    continue
-                dst_x = col_x[node_level[child_id]]
-                dst_y = node_y[child_id] + node_height(child) / 2
-                on_path = (nid in feasible_path_nodes and child_id in feasible_path_nodes)
-                color = '#28a745' if on_path else '#888'
-                # Midpoint routing: go right from src, then down/up to dst
-                mid_x = src_x + COL_GAP / 2
-                lines.append('<polyline points="%g,%g %g,%g %g,%g %g,%g" '
-                             'fill="none" stroke="%s" stroke-width="%s" '
-                             'marker-end="url(#arr)"/>'
-                             % (src_x, src_y, mid_x, src_y, mid_x, dst_y, dst_x, dst_y,
-                                color, '2' if on_path else '1.2'))
-                lbl = 'a%d' % ai
-                text(mid_x + 2, min(src_y, dst_y) + abs(dst_y - src_y) / 2,
-                     lbl, size=8, color=color)
-
-        # Nodes
-        for n in nodes_data:
-            nid = n['node_id']
-            lvl = node_level[nid]
-            nx = col_x[lvl]
-            ny = node_y[nid]
-            nh = node_height(n)
-            result = n.get('result', 'searching')
-            fill = RESULT_COLOR.get(result, '#eee')
-            stroke = RESULT_STROKE.get(result, '#999')
-            on_path = nid in feasible_path_nodes
-
-            rect(nx, ny, NODE_W, nh, fill, '#28a745' if on_path else stroke, rx=5)
-
-            # Header: node id + depth + result
-            result_short = {
-                'accepted': 'accepted ✓',
-                'accepted_with_replan': 'replan ✓',
-                'finish': 'finish ✓',
-                'backtracked': 'backtracked ✗',
-                'searching': 'searching…',
-            }.get(result, result)
-            header = 'n%d  d=%d  %s' % (nid, n.get('depth', 0), result_short)
-            text(nx + 5, ny + 11, header, size=10, bold=True,
-                 color=RESULT_STROKE.get(result, '#333'))
-
-            # Separator line under header
-            line(nx, ny + NODE_H_BASE, nx + NODE_W, ny + NODE_H_BASE, color='#ccc')
-
-            # Attempt rows
-            for ai, attempt in enumerate(n.get('attempts', [])):
-                ay = ny + NODE_H_BASE + ai * ATTEMPT_H
-                accepted = attempt.get('accepted')
-                ftype = attempt.get('failure_type') or ''
-                props = attempt.get('violated_props') or []
-                viol_at = attempt.get('violation_at_suffix_step')
-                plan_len = attempt.get('plan_length')
-
-                # Row background for accepted attempt
-                if accepted:
-                    lines.append('<rect x="%g" y="%g" width="%g" height="%g" '
-                                 'fill="#c3e6cb" opacity="0.5"/>'
-                                 % (nx + 1, ay, NODE_W - 2, ATTEMPT_H))
-
-                # Bullet
-                dot_color = '#28a745' if accepted else '#dc3545' if ftype == 'tla_property_violation' else '#aaa'
-                lines.append('<circle cx="%g" cy="%g" r="3" fill="%s"/>'
-                             % (nx + 9, ay + ATTEMPT_H / 2, dot_color))
-
-                # Attempt label
-                fshort = FTYPE_SHORT.get(ftype, ftype[:8]) if ftype else ('✓' if accepted else '?')
-                prop_label = ' '.join(_short_prop(p) for p in props[:2])
-                at_label = ('@%d' % viol_at) if viol_at is not None else ''
-                pl_label = ('L%d' % plan_len) if plan_len else ''
-                parts = [fshort]
-                if prop_label:
-                    parts.append(prop_label)
-                if at_label:
-                    parts.append(at_label)
-                if pl_label:
-                    parts.append(pl_label)
-                row_text = ' '.join(parts)
-                text(nx + 16, ay + ATTEMPT_H - 4, row_text, size=9,
-                     color='#28a745' if accepted else '#555')
-
-        # Legend
-        lx, ly = MARGIN, total_h - 60
-        for i, (label, fill, stroke) in enumerate([
-            ('accepted', '#d4edda', '#28a745'),
-            ('backtracked', '#f8d7da', '#dc3545'),
-            ('searching', '#fff3cd', '#856404'),
-        ]):
-            rx2 = lx + i * 110
-            lines.append('<rect x="%g" y="%g" width="12" height="12" rx="2" '
-                         'fill="%s" stroke="%s" stroke-width="1"/>'
-                         % (rx2, ly, fill, stroke))
-            text(rx2 + 16, ly + 10, label, size=9, color='#444')
-
-        lines.append('</svg>')
-
-        svg_path = trace_path.replace('.json', '_tree.svg')
-        Path(svg_path).write_text('\n'.join(lines), encoding='utf-8')
 
     @staticmethod
     def _build_tree_summary(planning_tree: Dict[str, object]) -> List[Dict[str, object]]:

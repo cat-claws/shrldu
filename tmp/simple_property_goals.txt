@@ -1,0 +1,12 @@
+Put object 4 on object 6.
+Keep object 4 on object 6.
+Never put object 4 on both object 3 and object 6.
+Keep object 4 clear.
+Keep object 8 clear.
+Keep object 10 clear.
+Put nothing on object 4.
+Put nothing on object 8.
+Put nothing on object 10.
+Raise the grasper after lowering it.
+put green medium block onto the blue one
+put red block on the green pyramid

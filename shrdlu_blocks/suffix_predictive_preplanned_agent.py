@@ -657,6 +657,22 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             'tla_verification': tlc_result,
         }
 
+        precondition_failures = [
+            note for note in prediction_notes
+            if 'precondition failed' in note.lower()
+        ]
+        if precondition_failures:
+            return {
+                'passed': False,
+                'predicted_ap_state': predicted_ap_state,
+                'failure': {
+                    'type': 'action_precondition_failed',
+                    'action': action,
+                    'message': precondition_failures[-1],
+                },
+                'prediction_detail': detail,
+            }
+
         if not passed:
             return {
                 'passed': False,
@@ -787,11 +803,16 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
             grasper.setdefault('tags', {})['closed'] = False
             return 'open_grasper: opened.'
 
+        if name in ('highlight_object', 'unhighlight_object'):
+            return '%s: visual-only action; no world state change.' % name
+
         return '%s: unknown action; no state change.' % name
 
     @staticmethod
     def _symbolic_grasper(state: Dict[str, object]) -> Dict[str, object]:
-        default_id = state.get('default_grasper', 0)
+        default_id = state.get('default_grasper')
+        if default_id is None:
+            default_id = 0
         grasper = _SuffixPredictivePreplannedShrdluAgentMixin._symbolic_object(state, default_id)
         if grasper is None:
             raise ValueError('No grasper object found in world state.')
@@ -821,8 +842,7 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
         if gx is None or gy is None:
             return None
 
-        best = None
-        best_z = None
+        candidates = []
         tol = 1e-4
         grasper_id = grasper.get('obj_id')
         for obj in state.get('objects', []):
@@ -840,11 +860,28 @@ class _SuffixPredictivePreplannedShrdluAgentMixin(_PredictivePreplannedShrdluAge
                 continue
             if abs(float(ox) - float(gx)) > tol or abs(float(oy) - float(gy)) > tol:
                 continue
-            z = float(pos.get('z', 0.0) or 0.0)
-            if best is None or z > best_z:
-                best = obj
-                best_z = z
-        return best
+            candidates.append(obj)
+        if not candidates:
+            return None
+
+        candidate_ids = {obj.get('obj_id') for obj in candidates}
+
+        def stack_depth(obj: Dict[str, object]) -> int:
+            depth = 0
+            seen = set()
+            support_id = obj.get('resting_on')
+            while support_id in candidate_ids and support_id not in seen:
+                seen.add(support_id)
+                depth += 1
+                support = cls._symbolic_object(state, support_id)
+                support_id = support.get('resting_on') if support else None
+            return depth
+
+        def score(obj: Dict[str, object]) -> Tuple[int, float]:
+            pos = obj.get('position', {})
+            return (stack_depth(obj), float(pos.get('z', 0.0) or 0.0))
+
+        return max(candidates, key=score)
 
     def _build_suffix_plan_prompt(
         self,

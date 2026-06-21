@@ -41,6 +41,119 @@ class SuffixPredictivePreplannedAgentTests(unittest.TestCase):
         self.assertIn('cleanup_notes', trace)
         self.assertIn('Skipped grasper cleanup', trace['cleanup_notes'][0])
 
+    def test_symbolic_prediction_foresees_object_lowered_onto_obj4(self):
+        agent = SuffixPredictivePreplannedOllamaShrdluAgent(
+            ShrdluBlocksEnv(),
+            trace_dir=None,
+            max_steps=8,
+            max_branch_retries=1,
+        )
+        initial_world_state = {
+            'default_grasper': None,
+            'grasper_closed': False,
+            'grasper_lowered': False,
+            'grasped_object': None,
+            'objects': [
+                {'obj_id': 0, 'kind': 'grasper', 'graspable': False, 'can_support': False, 'resting_on': None, 'position': {'x': -0.1, 'y': 0.4, 'z': 0.45}, 'tags': {}},
+                {'obj_id': 1, 'kind': 'table', 'graspable': False, 'can_support': True, 'resting_on': None, 'position': {'x': 0, 'y': 0, 'z': 0}, 'tags': {}},
+                {'obj_id': 2, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': 1, 'position': {'x': -0.3, 'y': 0.1, 'z': 0}, 'tags': {}},
+                {'obj_id': 4, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 6, 'position': {'x': -0.1, 'y': 0.4, 'z': 0.2}, 'tags': {}},
+                {'obj_id': 5, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': 2, 'position': {'x': -0.3, 'y': 0.05, 'z': 0.15}, 'tags': {}},
+                {'obj_id': 6, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': 1, 'position': {'x': -0.1, 'y': 0.4, 'z': 0}, 'tags': {}},
+                {'obj_id': 7, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': 1, 'position': {'x': 0.1, 'y': -0.15, 'z': 0}, 'tags': {}},
+                {'obj_id': 8, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 7, 'position': {'x': 0.15, 'y': -0.1, 'z': 0.15}, 'tags': {}},
+                {'obj_id': 9, 'kind': 'box', 'graspable': False, 'can_support': True, 'resting_on': 1, 'position': {'x': 0.25, 'y': 0.25, 'z': 0}, 'tags': {}},
+                {'obj_id': 10, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 9, 'position': {'x': 0.25, 'y': 0.25, 'z': 0}, 'tags': {}},
+            ],
+        }
+        actions = [
+            {'name': 'move_grasper', 'args': {'x': -0.3, 'y': 0.05}},
+            {'name': 'lower_grasper', 'args': {}},
+            {'name': 'close_grasper', 'args': {}},
+            {'name': 'raise_grasper', 'args': {}},
+            {'name': 'move_grasper', 'args': {'x': -0.1, 'y': 0.4}},
+            {'name': 'lower_grasper', 'args': {}},
+        ]
+
+        predicted_world_state, _notes = agent._predict_world_state_after_actions(
+            initial_world_state,
+            actions,
+        )
+        predicted_ap_state = agent._build_initial_ap_state(predicted_world_state)
+
+        obj5 = next(obj for obj in predicted_world_state['objects'] if obj['obj_id'] == 5)
+        self.assertEqual(4, obj5['resting_on'])
+        self.assertTrue(predicted_ap_state['some_object_resting_on_4'])
+
+    def test_symbolic_prediction_uses_top_object_when_snapshot_z_ties(self):
+        agent = SuffixPredictivePreplannedOllamaShrdluAgent(
+            ShrdluBlocksEnv(),
+            trace_dir=None,
+            max_steps=8,
+            max_branch_retries=1,
+        )
+        initial_world_state = {
+            'default_grasper': 0,
+            'grasper_closed': True,
+            'grasper_lowered': False,
+            'grasped_object': 2,
+            'objects': [
+                {'obj_id': 0, 'kind': 'grasper', 'graspable': False, 'can_support': False, 'resting_on': None, 'position': {'x': 0.25, 'y': 0.25, 'z': 0.45}, 'tags': {}},
+                {'obj_id': 1, 'kind': 'table', 'graspable': False, 'can_support': True, 'resting_on': None, 'position': {'x': 0, 'y': 0, 'z': 0}, 'tags': {}},
+                {'obj_id': 2, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': None, 'position': {'x': 0.25, 'y': 0.25, 'z': 0.4}, 'tags': {}},
+                {'obj_id': 4, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 3, 'position': {'x': -0.25, 'y': -0.2, 'z': 0.08}, 'tags': {}},
+                {'obj_id': 7, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': 1, 'position': {'x': 0.1, 'y': -0.15, 'z': 0}, 'tags': {}},
+                {'obj_id': 8, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 7, 'position': {'x': 0.15, 'y': -0.1, 'z': 0.15}, 'tags': {}},
+                {'obj_id': 9, 'kind': 'box', 'graspable': False, 'can_support': True, 'resting_on': 1, 'position': {'x': 0.25, 'y': 0.25, 'z': 0}, 'tags': {}},
+                {'obj_id': 10, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 9, 'position': {'x': 0.25, 'y': 0.25, 'z': 0}, 'tags': {}},
+            ],
+        }
+        actions = [{'name': 'lower_grasper', 'args': {}}]
+
+        predicted_world_state, _notes = agent._predict_world_state_after_actions(
+            initial_world_state,
+            actions,
+        )
+        predicted_ap_state = agent._build_initial_ap_state(predicted_world_state)
+
+        obj2 = next(obj for obj in predicted_world_state['objects'] if obj['obj_id'] == 2)
+        self.assertEqual(10, obj2['resting_on'])
+        self.assertTrue(predicted_ap_state['some_object_resting_on_10'])
+
+    def test_symbolic_prediction_foresees_object_lowered_onto_obj8(self):
+        agent = SuffixPredictivePreplannedOllamaShrdluAgent(
+            ShrdluBlocksEnv(),
+            trace_dir=None,
+            max_steps=8,
+            max_branch_retries=1,
+        )
+        initial_world_state = {
+            'default_grasper': 0,
+            'grasper_closed': True,
+            'grasper_lowered': False,
+            'grasped_object': 2,
+            'objects': [
+                {'obj_id': 0, 'kind': 'grasper', 'graspable': False, 'can_support': False, 'resting_on': None, 'position': {'x': 0.15, 'y': -0.1, 'z': 0.45}, 'tags': {}},
+                {'obj_id': 1, 'kind': 'table', 'graspable': False, 'can_support': True, 'resting_on': None, 'position': {'x': 0, 'y': 0, 'z': 0}, 'tags': {}},
+                {'obj_id': 2, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': None, 'position': {'x': 0.15, 'y': -0.1, 'z': 0.4}, 'tags': {}},
+                {'obj_id': 4, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 3, 'position': {'x': -0.25, 'y': -0.2, 'z': 0.08}, 'tags': {}},
+                {'obj_id': 7, 'kind': 'block', 'graspable': True, 'can_support': True, 'resting_on': 1, 'position': {'x': 0.1, 'y': -0.15, 'z': 0}, 'tags': {}},
+                {'obj_id': 8, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 7, 'position': {'x': 0.15, 'y': -0.1, 'z': 0.15}, 'tags': {}},
+                {'obj_id': 10, 'kind': 'pyramid', 'graspable': True, 'can_support': False, 'resting_on': 9, 'position': {'x': 0.25, 'y': 0.25, 'z': 0}, 'tags': {}},
+            ],
+        }
+        actions = [{'name': 'lower_grasper', 'args': {}}]
+
+        predicted_world_state, _notes = agent._predict_world_state_after_actions(
+            initial_world_state,
+            actions,
+        )
+        predicted_ap_state = agent._build_initial_ap_state(predicted_world_state)
+
+        obj2 = next(obj for obj in predicted_world_state['objects'] if obj['obj_id'] == 2)
+        self.assertEqual(8, obj2['resting_on'])
+        self.assertTrue(predicted_ap_state['some_object_resting_on_8'])
+
     def test_suffix_predictive_parser_recovers_nested_world_state_from_response_string(self):
         agent = SuffixPredictivePreplannedOllamaShrdluAgent(
             ShrdluBlocksEnv(),
